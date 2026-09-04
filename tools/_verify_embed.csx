@@ -4,8 +4,12 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 
-var dllPath = @"C:\code\C#\myrouter\bin\Release\net10.0-windows\myrouter.dll";
-var icoPath = @"C:\code\C#\myrouter\myrouter.ico";
+var dllPath = Args.Count > 0
+    ? Args[0]
+    : @"C:\code\C#\myrouter\bin\Release\net10.0-windows\myrouter.dll";
+var icoPath = Args.Count > 1
+    ? Args[1]
+    : @"C:\code\C#\myrouter\myrouter.ico";
 
 var asm = Assembly.LoadFile(dllPath);
 var names = asm.GetManifestResourceNames();

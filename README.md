@@ -43,7 +43,7 @@ dotnet build myrouter.slnx -c Release
 # 直接运行（或双击 bin\Release\net10.0-windows\myrouter.exe）
 dotnet run --project myrouter.csproj
 
-# 单文件自包含发布（无需装 .NET 运行时）
+# 单文件自包含发布（无需装 .NET 运行时；自动裁剪，约 35MB）
 dotnet publish myrouter.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 ```
 

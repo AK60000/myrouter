@@ -15,6 +15,17 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);tests/**</DefaultItemExcludes>
   </PropertyGroup>
 
+  <!-- 仅发布期生效：裁剪缩小自包含体积
+       _SuppressWinFormsTrimError：官方默认禁止 WinForms 裁剪（NETSDK1175），
+       本应用实测裁剪后可正常启动（SmokeTest + 启动验证通过），故显式放开
+       JsonSerializerIsReflectionEnabledByDefault：AppConfig 用 System.Text.Json 反射序列化
+       （非 source-gen），裁剪必须保留该路径，否则 Load()/Save() 运行时会抛异常 -->
+  <PropertyGroup Condition="'$(IsPublishing)' == 'true'">
+    <PublishTrimmed>true</PublishTrimmed>
+    <_SuppressWinFormsTrimError>true</_SuppressWinFormsTrimError>
+    <JsonSerializerIsReflectionEnabledByDefault>true</JsonSerializerIsReflectionEnabledByDefault>
+  </PropertyGroup>
+
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
   </ItemGroup>
