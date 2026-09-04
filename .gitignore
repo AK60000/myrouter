@@ -1,6 +1,7 @@
 # build output
 bin/
 obj/
+artifacts/
 
 # runtime config — contains API keys, never commit
 myrouter.config.json
@@ -13,3 +14,6 @@ tools/_preview/
 .vscode/
 *.user
 .DS_Store
+
+# Qwen Code local files
+.qwen/
