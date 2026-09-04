@@ -208,15 +208,30 @@ public class MainForm : Form
         _numPort.Margin = new Padding(0, 4, 0, 4);
         cfg.Controls.Add(_numPort, 1, 2);
 
-        // Row 3: 上游超时（秒）
-        cfg.Controls.Add(MakeLabel("超时 (秒)"), 0, 3);
-        _numTimeout.Dock = DockStyle.Left;
+        // Row 3: 上游超时
+        cfg.Controls.Add(MakeLabel("超时"), 0, 3);
+        var timeoutPanel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            WrapContents = false,
+            Margin = new Padding(0, 4, 0, 4),
+        };
         _numTimeout.Minimum = AppConfig.MinUpstreamTimeoutSeconds;
         _numTimeout.Maximum = AppConfig.MaxUpstreamTimeoutSeconds;
         _numTimeout.Value = AppConfig.DefaultUpstreamTimeoutSeconds;
         _numTimeout.Width = 120;
-        _numTimeout.Margin = new Padding(0, 4, 0, 4);
-        cfg.Controls.Add(_numTimeout, 1, 3);
+        timeoutPanel.Controls.Add(_numTimeout);
+        var lblTimeoutUnit = new Label
+        {
+            Text = "秒",
+            AutoSize = true,
+            ForeColor = Color.Gray,
+            Margin = new Padding(8, 5, 0, 0),
+        };
+        timeoutPanel.Controls.Add(lblTimeoutUnit);
+        cfg.Controls.Add(timeoutPanel, 1, 3);
 
         // Row 4: 鉴权 checkbox
         cfg.Controls.Add(MakeLabel(""), 0, 4);
