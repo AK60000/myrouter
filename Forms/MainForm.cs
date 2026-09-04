@@ -1,6 +1,6 @@
 using System;
+using System.Diagnostics;
 using System.Drawing;
-using System.Reflection;
 using System.Windows.Forms;
 using myrouter.Models;
 using myrouter.Services;
@@ -10,6 +10,7 @@ namespace myrouter.Forms;
 public class MainForm : Form
 {
     private readonly ProxyServer _proxy = new();
+    private Companion _companion = null!;
 
     private readonly TextBox _txtUpstream = new();
     private readonly TextBox _txtUpstreamKey = new();
@@ -23,9 +24,20 @@ public class MainForm : Form
     private readonly Button _btnStart = new();
     private readonly Button _btnStop = new();
     private readonly Button _btnSave = new();
+    private readonly Button _btnWeb = new();
     private readonly Label _lblStatus = new();
     private readonly TextBox _txtLog = new();
     private readonly Button _btnClearLog = new();
+
+    // 昼夜陪伴：说话条 + 触发节奏
+    private readonly PictureBox _companionAvatar = new();
+    private readonly Label _lblSay = new();
+    private readonly Button _btnMute = new();
+    private System.Windows.Forms.Timer _companionTimer = null!;
+    private int _lastHour = -1;
+    private DateTime _nextSayAt;
+    private bool _themeDark;
+    private Color _statusColor = Color.FromArgb(160, 0, 0);
 
     private readonly NotifyIcon _tray = new();
     private readonly ContextMenuStrip _trayMenu = new();
@@ -50,15 +62,9 @@ public class MainForm : Form
         BuildLayout();
         InitTray();
         LoadConfig();
+        InitCompanion();
 
-        _proxy.Log += msg =>
-        {
-            if (IsDisposed) return;
-            if (InvokeRequired)
-                BeginInvoke(() => AppendLog(msg));
-            else
-                AppendLog(msg);
-        };
+        _proxy.Log += msg => RunOnUi(() => AppendLog(msg));
 
         FormClosing += (_, e) =>
         {
@@ -128,6 +134,8 @@ public class MainForm : Form
             if (r != DialogResult.Yes) return;
         }
         SaveConfigSilent();
+        _companion.Snapshot(DateTime.Now);
+        _companionTimer.Stop();
         _reallyExit = true;
         Close();
     }
@@ -158,10 +166,11 @@ public class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 3,
+            RowCount = 4,
             Padding = new Padding(padding),
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // 说话条
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
 
@@ -293,11 +302,17 @@ public class MainForm : Form
         _btnSave.Text = "💾 保存配置";
         _btnSave.Size = new Size(120, 40);
         _btnSave.Click += (_, _) => SaveConfigWithFeedback();
-        btns.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnSave });
+        _btnWeb.Text = "🌐 打开 Web";
+        _btnWeb.Size = new Size(110, 40);
+        _btnWeb.Click += BtnWeb_Click;
+        btns.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnSave, _btnWeb });
         cfg.Controls.Add(btns, 0, 8);
         cfg.SetColumnSpan(btns, 3);
 
         root.Controls.Add(cfg, 0, 0);
+
+        // ── 说话条（昼夜陪伴） ──
+        root.Controls.Add(BuildCompanionBar(), 0, 1);
 
         // ── 状态区 ──
         var statusPanel = new Panel { Dock = DockStyle.Fill };
@@ -307,7 +322,7 @@ public class MainForm : Form
         _lblStatus.TextAlign = ContentAlignment.MiddleLeft;
         _lblStatus.Padding = new Padding(4, 0, 4, 0);
         statusPanel.Controls.Add(_lblStatus);
-        root.Controls.Add(statusPanel, 0, 1);
+        root.Controls.Add(statusPanel, 0, 2);
 
         // ── 日志区 ──
         var logPanel = new TableLayoutPanel
@@ -353,9 +368,128 @@ public class MainForm : Form
         _txtLog.Dock = DockStyle.Fill;
         logPanel.Controls.Add(_txtLog, 0, 1);
 
-        root.Controls.Add(logPanel, 0, 2);
+        root.Controls.Add(logPanel, 0, 3);
 
         Controls.Add(root);
+    }
+
+    // ── 昼夜陪伴 ──
+
+    private Control BuildCompanionBar()
+    {
+        var bar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 3,
+            RowCount = 1,
+            Margin = Padding.Empty,
+        };
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 34));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+        bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+        _companionAvatar.Size = new Size(26, 26);
+        _companionAvatar.Dock = DockStyle.Left;
+        _companionAvatar.SizeMode = PictureBoxSizeMode.Zoom;
+        _companionAvatar.Image = LoadAppIcon().ToBitmap();
+        _companionAvatar.Margin = new Padding(2, 6, 4, 0);
+        bar.Controls.Add(_companionAvatar, 0, 0);
+
+        _lblSay.Dock = DockStyle.Fill;
+        _lblSay.AutoEllipsis = true;
+        _lblSay.TextAlign = ContentAlignment.MiddleLeft;
+        _lblSay.Margin = new Padding(2, 5, 4, 0);
+        bar.Controls.Add(_lblSay, 1, 0);
+
+        _btnMute.Text = "🔕 静音";
+        _btnMute.AutoSize = true;
+        _btnMute.Height = 28;
+        _btnMute.Margin = new Padding(4, 6, 0, 0);
+        _btnMute.Click += (_, _) => ToggleMute();
+        bar.Controls.Add(_btnMute, 2, 0);
+        return bar;
+    }
+
+    private void InitCompanion()
+    {
+        _companion = new Companion(_proxy);
+        _companion.Says += msg => RunOnUi(() => ShowSay(msg));
+
+        // 初始昼夜主题（后续每 60s 检查一次是否跨时段）
+        _themeDark = ThemeManager.IsDark(DateTime.Now);
+        ThemeManager.Apply(this, _themeDark);
+        ApplyStatusColor();
+        UpdateTrayMenu();
+
+        var now = DateTime.Now;
+        _lastHour = now.Hour;
+        _companion.Snapshot(now);
+        _companion.Speak(_companion.BuildMessage(now, true));
+
+        _companionTimer = new System.Windows.Forms.Timer { Interval = 60_000 };
+        _companionTimer.Tick += (_, _) => CompanionTick(DateTime.Now);
+        _companionTimer.Start();
+    }
+
+    private void CompanionTick(DateTime now)
+    {
+        var dark = ThemeManager.IsDark(now);
+        if (dark != _themeDark)
+        {
+            _themeDark = dark;
+            ThemeManager.Apply(this, dark);
+            ApplyStatusColor();
+            _companion.Speak(dark ? "切入夜晚模式 🌙" : "切入白天模式 ☀️");
+        }
+
+        // 深夜（23:00-05:59）不做随机搭话；整点播报交给 BuildMessage——深夜自动只出劝睡文案
+        var quiet = now.Hour is >= 23 or < 6;
+        if (now.Hour != _lastHour)
+        {
+            _lastHour = now.Hour;
+            _companion.Snapshot(now);
+            _nextSayAt = now.AddMinutes(Random.Shared.Next(20, 41));
+            _companion.Speak(_companion.BuildMessage(now, true));
+        }
+        else if (!quiet && now >= _nextSayAt)
+        {
+            _companion.Snapshot(now);
+            _companion.Speak(_companion.BuildMessage(now, false));
+            _nextSayAt = now.AddMinutes(Random.Shared.Next(20, 41));
+        }
+    }
+
+    private void ShowSay(string msg)
+    {
+        _lblSay.Text = $"{DateTime.Now:HH:mm}  {msg}";
+    }
+
+    private void ToggleMute()
+    {
+        _companion.SetMuted(!_companion.Muted);
+        _btnMute.Text = _companion.Muted ? "🔔 恢复" : "🔕 静音";
+        if (!_companion.Muted) _companion.Speak("好啦，重新开始唠叨 🙂");
+    }
+
+    private void BtnWeb_Click(object? sender, EventArgs e)
+    {
+        if (!_proxy.IsRunning)
+        {
+            MessageBox.Show("请先启动服务，再打开 Web 界面", "myrouter",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        try
+        {
+            Process.Start(new ProcessStartInfo($"http://localhost:{_numPort.Value}/")
+            {
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(ex.Message, "打开失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private static Label MakeLabel(string text) => new()
@@ -431,7 +565,8 @@ public class MainForm : Form
             await _proxy.StartAsync(CurrentConfig());
             SaveConfigSilent();
             _lblStatus.Text = $"状态: 运行中 → http://localhost:{_numPort.Value}";
-            _lblStatus.ForeColor = Color.FromArgb(0, 130, 0);
+            _statusColor = Color.FromArgb(0, 130, 0);
+            ApplyStatusColor();
             _btnStop.Enabled = true;
             UpdateTrayMenu();
             AppendLog($"[GUI] 启动成功，监听 {_numPort.Value}");
@@ -452,7 +587,8 @@ public class MainForm : Form
         {
             await _proxy.StopAsync();
             _lblStatus.Text = "状态: 已停止";
-            _lblStatus.ForeColor = Color.FromArgb(160, 0, 0);
+            _statusColor = Color.FromArgb(160, 0, 0);
+            ApplyStatusColor();
             _btnStart.Enabled = true;
             UpdateTrayMenu();
             AppendLog("[GUI] 已停止");
@@ -468,5 +604,16 @@ public class MainForm : Form
     {
         var ts = DateTime.Now.ToString("HH:mm:ss");
         _txtLog.AppendText($"{ts}  {line}{Environment.NewLine}");
+    }
+
+    /// <summary>状态色单独恢复：主题切换会整体重设前景色，状态色要压回去。</summary>
+    private void ApplyStatusColor() => _lblStatus.ForeColor = _statusColor;
+
+    /// <summary>跨线程回调统一入口（Log / Says 事件都走这里）。</summary>
+    private void RunOnUi(Action a)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired) BeginInvoke(a);
+        else a();
     }
 }

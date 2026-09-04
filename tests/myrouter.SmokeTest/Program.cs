@@ -3,6 +3,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
+using System.Text.Json;
 using System.Threading.Tasks;
 using myrouter.Models;
 using myrouter.Services;
@@ -15,6 +16,7 @@ internal static class Program
     {
         const int upstreamPort = 18999;
         const int proxyPort = 18998;
+        var proxyMemoryPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-memory.json");
 
         using var upstream = new HttpListener();
         upstream.Prefixes.Add($"http://localhost:{upstreamPort}/");
@@ -62,6 +64,52 @@ internal static class Program
                     continue;
                 }
 
+                // /v1/chat/completions POST：LLM 记忆整理请求（body 带 x-memory-refine 标记）→ 返回整理结果
+                if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST" &&
+                    reqBody.Contains("x-memory-refine"))
+                {
+                    const string refineJson =
+                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"memories\\\":[\\\"用户喜欢喝咖啡\\\",\\\"用户关注天气\\\"]}\"}}]}";
+                    var rBytes = System.Text.Encoding.UTF8.GetBytes(refineJson);
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.ContentLength64 = rBytes.Length;
+                    await ctx.Response.OutputStream.WriteAsync(rBytes);
+                    ctx.Response.Close();
+                    continue;
+                }
+
+                // /v1/chat/completions POST：模拟上游 OpenAI 格式 SSE 流式响应
+                // （echo 带 headers + body，供 /chat 与长期记忆用例断言）
+                if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST")
+                {
+                    var sse =
+                        "data: {\"echo\":{\"stream\":true,\"auth\":\"" + headers.Replace("\"", "'") + "\",\"body\":\"" + reqBody.Replace("\"", "'") + "\"},\"choices\":[{\"delta\":{\"reasoning_content\":\"让我想想，\"}}]}\n\n" +
+                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"这个问题的答案很简单。\"}}]}\n\n" +
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"<thinking>先检查边界条件</thinking>你\"}}]}\n\n" +
+                        "data: {\"choices\":[{\"delta\":{\"content\":\"好\"}}]}\n\n" +
+                        "data: [DONE]\n\n";
+                    var sseBytes = System.Text.Encoding.UTF8.GetBytes(sse);
+                    ctx.Response.ContentType = "text/event-stream";
+                    ctx.Response.ContentLength64 = sseBytes.Length;
+                    await ctx.Response.OutputStream.WriteAsync(sseBytes);
+                    ctx.Response.Close();
+                    continue;
+                }
+
+                // /v1/models GET：模拟上游模型列表（带鉴权头回显，供 /models 用例断言）
+                if (path == "/v1/models" && ctx.Request.HttpMethod == "GET")
+                {
+                    var modelsJson =
+                        "{\"object\":\"list\",\"data\":[{\"id\":\"mock-model-a\"},{\"id\":\"mock-model-b\"}],\"auth\":\"" +
+                        headers + "\"}";
+                    var mBytes = System.Text.Encoding.UTF8.GetBytes(modelsJson);
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.ContentLength64 = mBytes.Length;
+                    await ctx.Response.OutputStream.WriteAsync(mBytes);
+                    ctx.Response.Close();
+                    continue;
+                }
+
                 var resp = $"upstream got {ctx.Request.HttpMethod} {path}{query}; headers=[{headers}]; body={reqBody}";
                 var bytes = System.Text.Encoding.UTF8.GetBytes(resp);
                 ctx.Response.ContentLength64 = bytes.Length;
@@ -70,7 +118,10 @@ internal static class Program
             }
         });
 
-        var proxy = new ProxyServer();
+        // 先删残留文件再构造 ProxyServer——MemoryStore 构造时会 Load，
+        // 后删的话内存里还留着旧条目（Case 19 会基于残留继续合并）
+        File.Delete(proxyMemoryPath);
+        var proxy = new ProxyServer(memoryPath: proxyMemoryPath, memoryRefineThreshold: 2);
         proxy.Log += Console.WriteLine;
 
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
@@ -114,14 +165,14 @@ internal static class Program
         // ── Case 3: x-api-key + POST body + query string ──
         await RunCase(proxy, http, "x-api-key + POST body + query forwarded correctly", authCfg, async h =>
         {
-            var req = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{proxyPort}/v1/chat/completions?stream=true&foo=bar");
+            var req = new HttpRequestMessage(HttpMethod.Post, $"http://localhost:{proxyPort}/v1/embeddings?stream=true&foo=bar");
             req.Headers.Add("x-api-key", "secret-key-123");
             req.Content = new StringContent("{\"model\":\"x\"}", System.Text.Encoding.UTF8, "application/json");
             var r = await h.SendAsync(req);
             var body = await r.Content.ReadAsStringAsync();
             // 期望: 路径 + query + body 都正确转发；x-api-key 不应被作为 Authorization 转发
             var ok = r.StatusCode == HttpStatusCode.OK
-                && body.Contains("/v1/chat/completions")
+                && body.Contains("/v1/embeddings")
                 && body.Contains("stream=true")
                 && body.Contains("foo=bar")
                 && body.Contains("{\"model\":\"x\"}")
@@ -260,6 +311,150 @@ internal static class Program
                 return r.StatusCode == HttpStatusCode.GatewayTimeout
                     ? null
                     : $"should be 504, got {r.StatusCode}";
+            });
+
+        // ── Case 15: Web 界面根路径本地服务（跳过鉴权），/v1/* 仍走鉴权代理 ──
+        await RunCase(proxy, http, "GET / serves web page (no auth) while /v1/* still proxied",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = true,
+                ApiKey = "secret-key-123",
+            }, async h =>
+            {
+                var page = await h.GetAsync($"http://localhost:{proxyPort}/");
+                var pageBody = await page.Content.ReadAsStringAsync();
+                if (page.StatusCode != HttpStatusCode.OK || !pageBody.Contains("<title>myrouter</title>"))
+                    return $"web page should be 200 with marker, got {page.StatusCode} body='{pageBody[..Math.Min(200, pageBody.Length)]}'";
+                // 不带 key 请求 /v1/* → 必须仍 401（证明根路径分流没有吞掉代理路径）
+                var proxied = await h.GetAsync($"http://localhost:{proxyPort}/v1/models");
+                return proxied.StatusCode == HttpStatusCode.Unauthorized
+                    ? null
+                    : $"proxied path should still require auth (401), got {proxied.StatusCode}";
+            });
+
+        // ── Case 16: /chat 无本地鉴权直接可用，转上游 SSE，且自动带 GUI 配置的上游 key ──
+        await RunCase(proxy, http, "/chat streams SSE from upstream using configured upstream key",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = true,
+                ApiKey = "local-key",
+                UpstreamApiKey = "sk-web-upstream-key",
+            }, async h =>
+            {
+                // 不带任何本地鉴权头 → web 路径跳过鉴权
+                var r = await h.PostAsync($"http://localhost:{proxyPort}/chat", new StringContent(
+                    "{\"model\":\"m1\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+                    System.Text.Encoding.UTF8, "application/json"));
+                var body = await r.Content.ReadAsStringAsync();
+                var ct = r.Content.Headers.ContentType?.ToString() ?? "";
+                var ok = r.StatusCode == HttpStatusCode.OK
+                    && ct.Contains("text/event-stream")
+                    && body.Contains("你") && body.Contains("[DONE]")
+                    && body.Contains("\"stream\":true")                 // 后端自动补 stream=true
+                    && body.Contains("reasoning_content")               // 字段思维链原样透传
+                    && body.Contains("<thinking>")                      // 正文内嵌 thinking 标签原样透传
+                    && body.Contains("Authorization=[Bearer sk-web-upstream-key]"); // 用配置的上游 key
+                if (!ok)
+                    return $"status={r.StatusCode} ct={ct} body={body}";
+
+                // 坏请求体（无 messages）→ 400 JSON error
+                var bad = await h.PostAsync($"http://localhost:{proxyPort}/chat", new StringContent(
+                    "{}", System.Text.Encoding.UTF8, "application/json"));
+                var badBody = await bad.Content.ReadAsStringAsync();
+                return bad.StatusCode == HttpStatusCode.BadRequest && badBody.Contains("error")
+                    ? null
+                    : $"bad request should be 400 JSON, got {bad.StatusCode} body='{badBody}'";
+            });
+
+        // ── Case 17: /models 免鉴权拉模型列表，key 用配置的上游 key ──
+        await RunCase(proxy, http, "/models lists upstream models with configured key",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = true,
+                ApiKey = "local-key",
+                UpstreamApiKey = "sk-model-key",
+            }, async h =>
+            {
+                var r = await h.GetAsync($"http://localhost:{proxyPort}/models");
+                var body = await r.Content.ReadAsStringAsync();
+                var ok = r.StatusCode == HttpStatusCode.OK
+                    && body.Contains("mock-model-a")
+                    && body.Contains("Authorization=[Bearer sk-model-key]");
+                return ok
+                    ? null
+                    : $"should list models with configured key, got {r.StatusCode} body='{body[..Math.Min(160, body.Length)]}'";
+            });
+
+        // ── Case 18: /logo.png 输出内嵌图标转的 PNG ──
+        await RunCase(proxy, http, "/logo.png serves PNG derived from embedded ico",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = true,
+                ApiKey = "local-key",
+            }, async h =>
+            {
+                var r = await h.GetAsync($"http://localhost:{proxyPort}/logo.png");
+                var bytes = await r.Content.ReadAsByteArrayAsync();
+                var ct = r.Content.Headers.ContentType?.ToString() ?? "";
+                var isPng = bytes.Length > 8 &&
+                            bytes[0] == 0x89 && bytes[1] == 0x50 &&
+                            bytes[2] == 0x4E && bytes[3] == 0x47;
+                return r.StatusCode == HttpStatusCode.OK && ct.Contains("image/png") && isPng
+                    ? null
+                    : $"status={r.StatusCode} ct={ct} len={bytes.Length} png={isPng}";
+            });
+
+        // ── Case 19: 长期记忆——短消息采集、LLM 整理、system 注入 ──
+        await RunCase(proxy, http, "Long-term memory: collect, LLM-refine, inject",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = false,
+            }, async h =>
+            {
+                var post = (string body) => h.PostAsync($"http://localhost:{proxyPort}/chat",
+                    new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
+
+                // 1) 两条短消息（阈值=2）→ 第二次请求触发后台 LLM 整理
+                var r1 = await post("{\"messages\":[{\"role\":\"user\",\"content\":\"我喜欢喝咖啡\"}]}");
+                if (r1.StatusCode != HttpStatusCode.OK) return $"first chat failed: {r1.StatusCode}";
+                await post("{\"messages\":[{\"role\":\"user\",\"content\":\"今天天气如何\"}]}");
+
+                // 2) 轮询等待异步整理完成（mock 返回整理后的记忆列表）
+                string json = "";
+                var deadline = DateTime.UtcNow.AddSeconds(3);
+                while (DateTime.UtcNow < deadline)
+                {
+                    if (File.Exists(proxyMemoryPath))
+                    {
+                        json = File.ReadAllText(proxyMemoryPath);
+                        if (json.Contains("用户喜欢喝咖啡") && json.Contains("用户关注天气")) break;
+                    }
+                    await Task.Delay(200);
+                }
+                if (!json.Contains("用户喜欢喝咖啡"))
+                    return $"LLM refine result missing: {json[..Math.Min(200, json.Length)]}";
+                using (var doc = JsonDocument.Parse(json))
+                {
+                    if (doc.RootElement.GetProperty("Pending").GetArrayLength() != 0)
+                        return $"pending not cleared after refine: {json[..Math.Min(160, json.Length)]}";
+                }
+
+                // 3) 整理后的记忆注入下一次请求的 system
+                var r3 = await post("{\"messages\":[{\"role\":\"user\",\"content\":\"介绍一下你自己\"}]}");
+                var b3 = await r3.Content.ReadAsStringAsync();
+                return b3.Contains("长期记忆") && b3.Contains("用户喜欢喝咖啡")
+                    ? null
+                    : $"memory not injected after refine: {b3[..Math.Min(300, b3.Length)]}";
             });
 
         // ── Case 8: 前缀去重 ─ upstream=/v1, client=/v1/chat/completions → /v1/chat/completions ──

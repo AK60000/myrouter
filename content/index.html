@@ -1,0 +1,685 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>myrouter</title>
+<link rel="icon" href="/logo.png">
+<style>
+  :root {
+    --bg: #0f1115;
+    --bg-grad: radial-gradient(1200px 600px at 15% -10%, #16202b 0%, #0f1115 55%);
+    --panel: #161a21;
+    --panel-2: #1c222c;
+    --border: rgba(255, 255, 255, .08);
+    --text: #e6e9ef;
+    --text-dim: #9aa3b2;
+    --accent: #00a7e6;
+    --user-bubble: #14532d33;         /* 用户气泡：暗绿染 */
+    --user-border: rgba(34, 197, 94, .28);
+    --danger: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    background: var(--bg-grad);
+    color: var(--text);
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* ── 顶栏 ── */
+  header {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(18, 21, 28, .72);
+    backdrop-filter: blur(8px);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header .logo { width: 30px; height: 30px; border-radius: 8px; }
+  header h1 { font-size: 16px; font-weight: 600; margin: 0; letter-spacing: .3px; }
+  header .spacer { flex: 1; }
+
+  .btn {
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--text);
+    border-radius: 9px;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .15s, border-color .15s;
+    user-select: none;
+  }
+  .btn:hover { border-color: rgba(255, 255, 255, .18); background: #232a36; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+  .btn.primary { background: linear-gradient(135deg, #00a7e6, #0077c8); border: none; color: #fff; }
+  .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+
+  /* ── 模型选择条 ── */
+  .modelBar {
+    max-width: 780px; margin: 0 auto 8px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; color: var(--text-dim);
+  }
+  .modelBar select {
+    flex: 1; max-width: 420px;
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; font-size: 13px; outline: none;
+  }
+  .modelBar select:focus { border-color: rgba(0, 167, 230, .55); }
+  .modelBar .hint { font-size: 12px; }
+
+  /* ── 消息区 ── */
+  main { flex: 1; overflow-y: auto; padding: 24px 20px; scroll-behavior: smooth; }
+  .msgWrap { max-width: 780px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+  .msg { display: flex; gap: 12px; animation: rise .22s ease; }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 8px; flex: none;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+  }
+  .msg.user { flex-direction: row-reverse; }
+  .msg.user .avatar { background: rgba(34, 197, 94, .16); color: #4ade80; }
+  .msg.ai .avatar { background: rgba(0, 167, 230, .16); color: #38bdf8; }
+  .bubble {
+    max-width: min(72%, 560px);
+    padding: 10px 14px;
+    border-radius: 14px;
+    font-size: 14.5px;
+    line-height: 1.65;
+    word-break: break-word;
+  }
+  .msg.user .bubble {
+    background: var(--user-bubble);
+    border: 1px solid var(--user-border);
+    border-top-right-radius: 4px;
+    /* 用户消息是纯文本（markdown 渲染只作用于 AI 侧），保留原始换行 */
+    white-space: pre-wrap;
+  }
+  .msg.ai .bubble {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-top-left-radius: 4px;
+    /* 固定宽度：fit-content 会因 overflow-x:auto 的 pre 不贡献溢出宽度而收缩，
+       导致代码块横向滚动、流式过程宽度抖动（表现为"内容越来越靠右"） */
+    width: min(72%, 560px);
+  }
+  .bubble img { max-width: 100%; border-radius: 8px; display: block; margin: 6px 0; }
+  .bubble :is(code, pre) { font-family: Consolas, monospace; font-size: 13px; }
+  .bubble code { background: rgba(255, 255, 255, .09); padding: 1px 5px; border-radius: 4px; }
+  .bubble pre { background: #0b0e13; border: 1px solid var(--border); padding: 10px; border-radius: 8px; overflow-x: auto; white-space: pre; }
+  .bubble pre code { background: none; padding: 0; }
+  .bubble p { margin: 4px 0; }
+  .bubble h1, .bubble h2, .bubble h3, .bubble h4, .bubble h5, .bubble h6 { margin: 10px 0 4px; line-height: 1.35; }
+  .bubble ul, .bubble ol { margin: 4px 0; padding-left: 22px; }
+  .bubble blockquote { margin: 6px 0; padding: 2px 12px; border-left: 3px solid var(--border); color: var(--text-dim); }
+  .bubble hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+  .bubble a { color: var(--accent); }
+  .bubble table { border-collapse: collapse; margin: 6px 0; }
+  .bubble th, .bubble td { border: 1px solid var(--border); padding: 4px 10px; }
+  /* 思维链折叠块 */
+  .bubble details.think {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, .03);
+    padding: 6px 12px;
+    margin-bottom: 10px;
+    font-size: 13px;
+  }
+  .bubble details.think summary {
+    cursor: pointer; user-select: none;
+    color: var(--text-dim); font-size: 12.5px;
+    list-style: none;
+  }
+  .bubble details.think summary::-webkit-details-marker { display: none; }
+  .bubble details.think summary::before { content: "▸ "; }
+  .bubble details.think[open] summary::before { content: "▾ "; }
+  .bubble details.think .thinkBody { margin-top: 8px; color: var(--text-dim); }
+  .cursor::after { content: "▍"; color: var(--accent); animation: blink .9s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .err .bubble, .bubble.err { border-color: rgba(248, 113, 113, .4); color: var(--danger); }
+  .empty { color: var(--text-dim); text-align: center; margin-top: 18vh; font-size: 13.5px; line-height: 2; }
+  .empty .k { display: inline-block; padding: 2px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 12px; margin: 0 2px; }
+
+  /* ── 输入区 ── */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 14px 20px 18px;
+    background: rgba(15, 17, 21, .85);
+    backdrop-filter: blur(8px);
+  }
+  .composer {
+    max-width: 780px; margin: 0 auto;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 10px 12px;
+    transition: border-color .15s;
+  }
+  .composer:focus-within { border-color: rgba(0, 167, 230, .55); }
+  #input {
+    width: 100%;
+    background: none; border: none; outline: none;
+    color: var(--text);
+    font: inherit; font-size: 14.5px; line-height: 1.6;
+    resize: none; max-height: 180px;
+    min-height: 24px;
+    padding: 2px 2px 8px;
+  }
+  #input::placeholder { color: var(--text-dim); }
+  .composerRow { display: flex; align-items: center; gap: 8px; }
+  .composerRow .spacer { flex: 1; }
+  .hint { font-size: 12px; color: var(--text-dim); }
+  .files { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 8px; }
+  .fileChip {
+    display: flex; align-items: center; gap: 8px;
+    background: #10141b; border: 1px solid var(--border);
+    border-radius: 8px; padding: 5px 8px; font-size: 12px;
+    max-width: 260px;
+  }
+  .fileChip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fileChip .thumb { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; }
+  .fileChip .rm { cursor: pointer; color: var(--text-dim); padding: 0 4px; }
+  .fileChip .rm:hover { color: var(--danger); }
+</style>
+</head>
+<body>
+
+<header>
+  <img class="logo" src="/logo.png" alt="myrouter">
+  <h1>myrouter</h1>
+  <div class="spacer"></div>
+  <span class="hint">单会话 · 刷新页面即清空对话</span>
+</header>
+
+<main id="chat">
+  <div class="msgWrap" id="wrap">
+    <div class="empty">
+      本地 AI 聊天 · 请求经 myrouter 转发到你的上游<br>
+      Enter 发送 · Shift+Enter 换行 · 可上传文件作为附件
+    </div>
+  </div>
+</main>
+
+<footer>
+  <div class="modelBar">
+    <label for="modelSelect">模型</label>
+    <select id="modelSelect" title="选择模型"></select>
+    <button class="btn" id="btnReload" title="重新拉取模型列表">↻ 刷新</button>
+    <span class="hint" id="modelHint"></span>
+    <span class="hint" id="ctxHint"></span>
+  </div>
+  <div class="composer">
+    <div class="files" id="files"></div>
+    <textarea id="input" rows="1" placeholder="输入消息…（Shift+Enter 换行）"></textarea>
+    <div class="composerRow">
+      <button class="btn" id="btnUpload" title="上传文件（图片 / 文档 / 任意类型）">📎 附件</button>
+      <input type="file" id="fileInput" multiple hidden>
+      <div class="spacer"></div>
+      <span class="hint" id="hint"></span>
+      <button class="btn primary" id="btnSend">发送</button>
+    </div>
+  </div>
+</footer>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const wrap = $("wrap"), input = $("input"), filesBox = $("files"), modelSelect = $("modelSelect");
+
+let messages = [];          // OpenAI 格式消息（含多模态 content）
+let attachments = [];       // { name, size, mime, dataUri }
+let busy = false;
+
+const settings = {
+  get model() { return localStorage.getItem("mr.model") || ""; },
+  set model(v) { localStorage.setItem("mr.model", v); },
+};
+function addMsg(role, html, cls = "") {
+  const empty = wrap.querySelector(".empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = `msg ${role} ${cls}`;
+  const av = role === "user" ? "你" : "M";
+  div.innerHTML = `<div class="avatar">${av}</div><div class="bubble">${html}</div>`;
+  wrap.appendChild(div);
+  scrollBottom();
+  return div;
+}
+function userBubble(parts) {
+  let html = "";
+  for (const p of parts || []) {
+    if (p.type === "text") html += esc(p.text);
+    else if (p.type === "image_url") html += `<img src="${esc(p.image_url.url)}">`;
+    else if (p.type === "file") {
+      const src = p.file?.data || p.file?.url || "";
+      html += src.startsWith("data:image/")
+        ? `<img src="${esc(src)}">`
+        : `<div style="opacity:.85">📄 ${esc(p.file?.filename || "attachment")}</div>`;
+    }
+  }
+  return html;
+}
+let liveBubble = null;      // 当前 AI 气泡 .bubble
+let thinkBox = null;        // 思维链 <details>（建立后不重建，保持用户展开状态）
+let contentNode = null;     // 正文节点（单独更新）
+function ensureThink() {
+  if (!thinkBox) {
+    thinkBox = document.createElement("details");
+    thinkBox.className = "think";
+    const s = document.createElement("summary");
+    s.textContent = "🧠 思考过程";
+    const b = document.createElement("div");
+    b.className = "thinkBody";
+    thinkBox.append(s, b);
+    liveBubble.prepend(thinkBox);
+  }
+  return thinkBox;
+}
+/**
+ * 提取正文里内嵌的思维链标签（<thinking>…</thinking> 或 <think>…</think>，
+ * 允许未闭合，流式友好），返回 { text: 干净正文, thinking: 提取的思维链 }。
+ * 大小写不敏感、支持多块。
+ */
+function splitThinking(src) {
+  const OPEN_TAGS = ["<thinking>", "<think>"];
+  const CLOSE_TAGS = ["</thinking>", "</think>"];
+  let text = String(src ?? "");
+  const lower = text.toLowerCase();
+  let out = "";
+  let thinking = "";
+  let i = 0;
+  for (let guard = 0; guard < 16; guard++) {
+    let open = -1, openLen = 0;
+    for (const tag of OPEN_TAGS) {
+      const idx = lower.indexOf(tag, i);
+      if (idx !== -1 && (open === -1 || idx < open)) { open = idx; openLen = tag.length; }
+    }
+    if (open === -1) { out += text.slice(i); break; }
+    out += text.slice(i, open);
+    let close = -1, closeLen = 0;
+    for (const tag of CLOSE_TAGS) {
+      const idx = lower.indexOf(tag, open + openLen);
+      if (idx !== -1 && (close === -1 || idx < close)) { close = idx; closeLen = tag.length; }
+    }
+    if (close === -1) { // 未闭合：剩余部分视为进行中的思维链
+      thinking += text.slice(open + openLen);
+      break;
+    }
+    thinking += text.slice(open + openLen, close);
+    i = close + closeLen;
+  }
+  return { text: out, thinking };
+}
+function renderContent(mdText, reasoning, withCursor) {
+  const sp = splitThinking(mdText);
+  const rt = (reasoning ? reasoning + "\n" : "") + sp.thinking;
+  if (rt) {
+    const body = ensureThink().querySelector(".thinkBody");
+    body.innerHTML = mdToHtml(rt);
+  }
+  if (!contentNode) {
+    contentNode = document.createElement("div");
+    contentNode.className = "prose";
+    liveBubble.appendChild(contentNode);
+  }
+  contentNode.innerHTML = mdToHtml(sp.text) + (withCursor ? `<span class="cursor"></span>` : "");
+  liveBubble.scrollIntoView({ block: "nearest" });
+  return sp.text;   // 剔除思维链后的干净正文，供写入会话历史
+}
+function finishStream() {
+  if (contentNode) contentNode.querySelector(".cursor")?.remove();
+  else if (!liveBubble.classList.contains("err"))
+    liveBubble.innerHTML = "";   // 空回复：清掉占位，不留闪烁残留（错误气泡保留文案）
+  liveBubble = null;
+  thinkBox = null;
+  contentNode = null;
+}
+function scrollBottom() { wrap.scrollIntoView({ block: "end" }); }
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ── 轻量 Markdown 渲染（无依赖；所有内容先 esc 再套标签，防注入） ── */
+function safeUrl(u) {
+  const s = String(u).replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+  return /^(https?:|mailto:|#)/i.test(s) ? s : "#";
+}
+function inline(t) {
+  return String(t)
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+      (_, alt, url) => `<img src="${safeUrl(url)}" alt="${alt}">`)
+    .replace(/\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
+      (_, txt, url) => `<a href="${safeUrl(url)}" target="_blank" rel="noopener">${txt}</a>`)
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+}
+function renderBlock(block) {
+  let html = "";
+  let list = null;
+  let quote = null;
+  let codeLines = null;     // 缩进代码块（4 空格 / tab 起头）
+  // 列表累积字符串以 <ul>/<ol> 开头；flush 时必须补上闭合标签，
+  // 否则浏览器会把后续内容解析进列表内（ul 有 padding-left，逐层右移 22px → "越来越靠右"）
+  const flushList = () => {
+    if (list) {
+      html += list + (list.startsWith("<ol>") ? "</ol>" : "</ul>");
+      list = null;
+    }
+  };
+  const flushQuote = () => {
+    if (quote) {
+      html += `<blockquote>${inline(quote.join("<br>"))}</blockquote>`;
+      quote = null;
+    }
+  };
+  const flushCode = () => {
+    if (codeLines) {
+      html += `<pre><code>${esc(codeLines.join("\n"))}</code></pre>`;
+      codeLines = null;
+    }
+  };
+  for (const raw of block.split("\n")) {
+    const line = raw.trim();
+    if (!line) { flushList(); flushQuote(); flushCode(); continue; }
+    // 缩进代码块：4 空格或 tab 起头，且缩进后不是列表/引用/标题标记
+    // （markdown 里 `    - x` / `    1. x` 是嵌套列表，不是代码块——误判会产生阶梯状右移；
+    //   注意 `^\d+[.)]` 必须带行首锚点，否则代码里的 `(3000)` 会被误判成有序列表标记）
+    const indented = raw.match(/^(\t+| {4,})(.*)$/);
+    if (indented && !/^[-*+>#]|^\d+[.)]/.test(indented[2])) {
+      flushList();
+      flushQuote();
+      if (!codeLines) codeLines = [];
+      codeLines.push(raw);
+      continue;
+    }
+    flushCode();
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { flushList(); flushQuote(); html += `<h${h[1].length}>${inline(esc(h[2]))}</h${h[1].length}>`; continue; }
+    if (/^-{3,}$/.test(line)) { flushList(); flushQuote(); html += "<hr>"; continue; }
+    const ul = line.match(/^[-*]\s+(.*)$/);
+    if (ul) {
+      flushQuote();
+      if (list && list.startsWith("<ol>")) flushList();   // 类型切换先闭合旧列表
+      list ??= "<ul>";
+      list += `<li>${inline(esc(ul[1]))}</li>`;
+      continue;
+    }
+    const ol = line.match(/^\d+[.)]\s+(.*)$/);
+    if (ol) {
+      flushQuote();
+      if (list && list.startsWith("<ul>")) flushList();
+      list ??= "<ol>";
+      list += `<li>${inline(esc(ol[1]))}</li>`;
+      continue;
+    }
+    if (line.startsWith(">")) {
+      flushList();
+      if (!quote) quote = [];
+      quote.push(esc(line.replace(/^>\s?/, "")));
+      continue;
+    }
+    flushList(); flushQuote();
+    html += `<p>${inline(esc(line))}</p>`;
+  }
+  flushList(); flushQuote(); flushCode();
+  return html;
+}
+function mdToHtml(src) {
+  const codeBlocks = [];
+  const s = String(src ?? "").replace(/```([\w+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    codeBlocks.push(`<pre><code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(code.replace(/\n$/, ""))}</code></pre>`);
+    return `\u0000${codeBlocks.length - 1}\u0000`;
+  });
+  let html = "";
+  let i = 0;
+  while (true) {
+    const ph = s.indexOf("\u0000", i);
+    if (ph === -1) { html += renderBlock(s.slice(i)); break; }
+    html += renderBlock(s.slice(i, ph));
+    const close = s.indexOf("\u0000", ph + 1);
+    const idx = Number(s.slice(ph + 1, close));
+    html += codeBlocks[idx];
+    i = close + 1;
+  }
+  return html;
+}
+
+/* ── 附件 ── */
+$("btnUpload").addEventListener("click", () => $("fileInput").click());
+$("fileInput").addEventListener("change", () => {
+  for (const f of $("fileInput").files) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      attachments.push({ name: f.name, size: f.size, mime: f.type || "application/octet-stream", dataUri: reader.result });
+      renderFiles();
+    };
+    reader.readAsDataURL(f);
+  }
+  $("fileInput").value = "";
+});
+function renderFiles() {
+  filesBox.innerHTML = "";
+  const max = 40;
+  for (let i = 0; i < attachments.length; i++) {
+    const a = attachments[i];
+    const chip = document.createElement("div");
+    chip.className = "fileChip";
+    const thumb = a.mime.startsWith("image/") ? `<img class="thumb" src="${esc(a.dataUri)}">` : "📄";
+    const size = a.size >= 1048576 ? (a.size / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(a.size / 1024)) + " KB";
+    chip.innerHTML = thumb + `<span class="name">${esc(a.name)} · ${size}</span><span class="rm">✕</span>`;
+    chip.querySelector(".rm").onclick = () => { attachments.splice(i, 1); renderFiles(); };
+    filesBox.appendChild(chip);
+  }
+}
+
+/* ── 发送 ── */
+async function send() {
+  const text = input.value.trim();
+  if (busy || (!text && attachments.length === 0)) return;
+  busy = true;
+  $("btnSend").disabled = true;
+  $("hint").textContent = "生成中…";
+  input.value = "";
+  autoGrow();
+
+  const parts = [];
+  if (text) parts.push({ type: "text", text });
+  for (const a of attachments) {
+    if (a.mime.startsWith("image/")) parts.push({ type: "image_url", image_url: { url: a.dataUri } });
+    else parts.push({ type: "file", file: { data: a.dataUri, filename: a.name } });
+  }
+  attachments = [];
+  renderFiles();
+
+  addMsg("user", userBubble(parts));
+  const userMsg = { role: "user", content: parts };
+  messages.push(userMsg);
+
+  liveBubble = addMsg("ai", "").querySelector(".bubble");   // 空占位：光标由 renderContent 动态追加/移除
+  let full = "";
+  let reasoning = "";
+  try {
+    const msgs = trimMessages(messages, currentContextBudget());   // 超预算时从最旧裁剪
+    const res = await fetch("/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: modelSelect.value || undefined,
+        messages: msgs,
+      }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of block.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          let j;
+          try { j = JSON.parse(data); } catch { continue; }
+          if (j.error) throw new Error(j.error);
+          const delta = j.choices?.[0]?.delta;
+          if (!delta) continue;
+          // 思维链字段各家不一：DeepSeek → reasoning_content；OpenAI/OpenRouter → reasoning
+          // （字符串 / {content} / Responses 形态 {summary:[{text}]} / 数组）
+          const c = delta.content;
+          const rc = delta.reasoning_content ?? delta.reasoning;
+          let rt = "";
+          if (typeof rc === "string") rt = rc;
+          else if (typeof rc === "number") rt = String(rc);
+          else if (Array.isArray(rc)) rt = rc.map(x => x?.text ?? "").join("");
+          else if (rc) {
+            if (typeof rc.content === "string") rt = rc.content;
+            else if (Array.isArray(rc.summary)) rt = rc.summary.map(s => s?.text ?? "").join("");
+          }
+          if (c) full += c;
+          if (rt) reasoning += rt;
+          if (c || rt) renderContent(full, reasoning, true);
+        }
+      }
+    }
+    // 入会话历史的正文必须剔除 <thinking>，否则下一轮会把这些思维链回传给上游
+    const cleanAnswer = renderContent(full, reasoning, false);
+    finishStream();
+    if (cleanAnswer) messages.push({ role: "assistant", content: cleanAnswer });
+  } catch (e) {
+    liveBubble.classList.add("err");
+    liveBubble.textContent = "出错了：" + e.message;
+    finishStream();
+  }
+  busy = false;
+  $("btnSend").disabled = false;
+  $("hint").textContent = "";
+}
+$("btnSend").addEventListener("click", send);
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.addEventListener("input", autoGrow);
+function autoGrow() {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 180) + "px";
+}
+
+/* ── 模型选择：GET /models 拉取填下拉，缓存 5 分钟，可手动刷新 ── */
+const MODEL_CACHE_MS = 5 * 60 * 1000;
+let modelCtx = {};   // modelId -> context_length（来自上游 /models，可能缺失）
+const DEFAULT_CONTEXT = 32000;
+
+async function loadModels(force) {
+  const cached = (() => { try { return JSON.parse(localStorage.getItem("mr.models")); } catch { return null; } })();
+  if (!force && cached && Date.now() - cached.ts < MODEL_CACHE_MS) { fillModels(cached.ids || [], cached.ctx || {}); return; }
+  $("modelHint").textContent = "加载中…";
+  try {
+    const res = await fetch("/models");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const j = await res.json();
+    const list = (j.data || []).filter(Boolean);
+    const ids = list.map(m => m.id).filter(Boolean);
+    const ctx = {};
+    for (const m of list)
+      if (m.id && Number.isFinite(m.context_length) && m.context_length > 0) ctx[m.id] = m.context_length;
+    localStorage.setItem("mr.models", JSON.stringify({ ts: Date.now(), ids, ctx }));
+    fillModels(ids, ctx);
+    $("modelHint").textContent = ids.length ? `共 ${ids.length} 个` : "";
+  } catch {
+    $("modelHint").textContent = "列表拉取失败，请检查上游配置后重试";
+  }
+}
+function fillModels(ids, ctxMap = {}) {
+  const prev = modelSelect.value;
+  modelSelect.innerHTML = "";
+  appendOption("", "（未选择）");
+  for (const id of ids) appendOption(id, id);
+  modelSelect.value = settings.model && ids.includes(settings.model) ? settings.model
+    : ids.includes(prev) ? prev
+    : "";
+  modelCtx = ctxMap;
+  updateCtxHint();
+}
+function appendOption(value, text) {
+  const opt = document.createElement("option");
+  opt.value = value;
+  opt.textContent = text;
+  modelSelect.appendChild(opt);
+}
+function updateCtxHint() {
+  const id = modelSelect.value;
+  const len = id && modelCtx[id];
+  $("ctxHint").textContent = len ? `· 上下文 ${Math.round(len / 1000)}k` : "";
+}
+modelSelect.addEventListener("change", () => {
+  settings.model = modelSelect.value;
+  updateCtxHint();
+});
+$("btnReload").addEventListener("click", () => loadModels(true));
+loadModels(false);
+
+/* ── 上下文窗口：按模型 context_length 的 60% 做历史预算，超了从最旧裁剪 ── */
+function currentContextBudget() {
+  const id = modelSelect.value;
+  const full = id && Number.isFinite(modelCtx[id]) ? modelCtx[id] : DEFAULT_CONTEXT;
+  return Math.max(2048, Math.floor(full * 0.6));
+}
+function estTokens(s) {
+  const str = String(s ?? "");
+  let cjk = 0, other = 0;
+  for (const ch of str) {
+    if (ch.charCodeAt(0) > 0x2e80) cjk++; else other++;
+  }
+  return Math.ceil(cjk * 1.2 + other * 0.3);
+}
+function msgTokens(m) {
+  let c = 0;
+  const content = m && m.content;
+  if (typeof content === "string") c = estTokens(content);
+  else if (Array.isArray(content)) {
+    for (const p of content) {
+      if (!p) continue;
+      if (p.type === "text") c += estTokens(p.text);
+      else if (p.type === "image_url") c += 1000;               // 图片按固定粗略值
+      else if (p.type === "file") c += estTokens(p.file?.data || p.file?.url || "");
+    }
+  }
+  return c + 4;   // 每条消息的角色/结构开销
+}
+function trimMessages(list, budget) {
+  if (!Array.isArray(list) || list.length <= 2) return list;
+  let total = 0;
+  const costs = list.map(m => { const c = msgTokens(m); total += c; return c; });
+  if (total <= budget) return list;
+  let drop = 0;
+  while (drop < costs.length - 2 && total > budget) {   // 至少保留最近一轮
+    total -= costs[drop];
+    drop++;
+  }
+  return drop === 0 ? list : list.slice(drop);
+}
+
+input.focus();
+</script>
+</body>
+</html>

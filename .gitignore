@@ -3,8 +3,8 @@ bin/
 obj/
 artifacts/
 
-# runtime config — contains API keys, never commit
-myrouter.config.json
+# runtime data — config/memory/companion stats may contain keys & chat snippets, never commit
+.myrouter/
 
 # tool-generated previews
 tools/_preview/

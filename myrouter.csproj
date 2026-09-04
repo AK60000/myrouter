@@ -29,6 +29,8 @@
 
   <ItemGroup>
     <EmbeddedResource Include="myrouter.ico" />
+    <!-- Web 界面单文件页面：打进 exe，浏览器访问 http://localhost:{port}/ 即用 -->
+    <EmbeddedResource Include="content\index.html" />
   </ItemGroup>
 
 </Project>

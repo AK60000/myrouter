@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text.Json;
+using myrouter.Services;
 
 namespace myrouter.Models;
 
@@ -23,11 +24,11 @@ public class AppConfig
     public bool RequireAuth { get; set; } = true;
     public bool LogRequests { get; set; } = false;
 
-    private static string ConfigPath => Path.Combine(
-        AppContext.BaseDirectory, "myrouter.config.json");
+    private static string ConfigPath => AppPaths.ConfigFile;
 
     public static AppConfig Load()
     {
+        AppPaths.MigrateLegacy();   // 旧版散落文件一次性迁入 .myrouter/
         try
         {
             if (!File.Exists(ConfigPath)) return new AppConfig();
@@ -42,6 +43,7 @@ public class AppConfig
     {
         try
         {
+            AppPaths.EnsureDir();
             var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(ConfigPath, json);
         }

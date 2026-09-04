@@ -1,9 +1,13 @@
 using System;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -23,6 +27,29 @@ public class ProxyServer : IDisposable
     private const int StatusClientClosedRequest = 499; // nginx 私有码：客户端提前断开
     // 请求体防御性上限：LLM 请求体通常很小（含 base64 图片也就几 MB），512MB 足够且防内存耗尽
     private const long MaxRequestBodyBytes = 512L * 1024 * 1024;
+
+    /// <summary>本次运行（自进程启动起）的转发统计，供陪伴面板播报。字段用 Interlocked 更新。</summary>
+    public sealed class ProxyStats
+    {
+        public long Requests;
+        public long Success;
+        public long Errors;
+        public long Timeouts;
+        public long TokensIn;
+        public long TokensOut;
+    }
+
+    private readonly ProxyStats _stats = new();
+    public ProxyStats Stats => _stats;
+
+    private readonly MemoryStore _memory;
+    private string? _lastModel;   // 最近一次 /chat 用的模型，LLM 记忆整理复用
+
+    public ProxyServer(string? memoryPath = null, int memoryRefineThreshold = 8)
+    {
+        _memory = new MemoryStore(memoryPath, memoryRefineThreshold);
+        _memory.Refiner = RefineMemoriesAsync;
+    }
 
     // 透明代理：必须原样透传上游响应（含 Content-Encoding/Content-Length），
     // 因此禁掉 HttpClient 的自动解压——自动解压会解掉 gzip 但保留压缩前长度，破坏响应语义。
@@ -106,6 +133,17 @@ public class ProxyServer : IDisposable
             if (HttpMethods.IsOptions(ctx.Request.Method))
             {
                 ctx.Response.StatusCode = (int)HttpStatusCode.NoContent;
+                return;
+            }
+            await next();
+        });
+
+        // Web 界面分流：根路径等本地路径由本机 UI 使用（跳过本地鉴权），其余路径照常走代理
+        app.Use(async (ctx, next) =>
+        {
+            if (IsWebRequest(ctx))
+            {
+                await HandleWebAsync(ctx);
                 return;
             }
             await next();
@@ -216,11 +254,334 @@ public class ProxyServer : IDisposable
         "Access-Control-Expose-Headers",
     ];
 
+    // ── Web 界面（同端口根路径，本机 UI 使用，跳过本地鉴权） ──
+
+    private static readonly JsonSerializerOptions ChatJsonOptions = new()
+    {
+        // 转发请求体中文原样输出（默认会转义成 \uXXXX，徒增体积且难调试）
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+    };
+
+    private static bool IsWebRequest(HttpContext ctx)
+    {
+        var p = ctx.Request.Path;
+        return HttpMethods.IsGet(ctx.Request.Method)
+            ? p.Equals("/") || p.Equals("/models") || p.Equals("/logo.png")
+            : HttpMethods.IsPost(ctx.Request.Method) && p.Equals("/chat");
+    }
+
+    private async Task HandleWebAsync(HttpContext ctx)
+    {
+        if (ctx.Request.Path.Equals("/chat"))
+        {
+            await HandleChatAsync(ctx);
+            return;
+        }
+        if (ctx.Request.Path.Equals("/models"))
+        {
+            await HandleModelsAsync(ctx);
+            return;
+        }
+        if (ctx.Request.Path.Equals("/logo.png"))
+        {
+            await HandleLogoAsync(ctx);
+            return;
+        }
+
+        ctx.Response.ContentType = "text/html; charset=utf-8";
+        var html = LoadEmbeddedResource("index.html") is { Length: > 0 } bytes
+            ? Encoding.UTF8.GetString(bytes)
+            : "<h1>myrouter</h1><p>Web 页面缺失</p>";
+        await ctx.Response.WriteAsync(html, ctx.RequestAborted);
+    }
+
+    /// <summary>
+    /// 模型列表端点：转上游 /v1/models。key 统一用配置的 _upstreamKey
+    /// （Web 端不再管理 API Key）。Web 路径免本地鉴权。
+    /// </summary>
+    private async Task HandleModelsAsync(HttpContext ctx)
+    {
+        var apiKey = _upstreamKey;
+
+        var url = BuildUpstreamUrl("/v1/models", null);
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        if (apiKey is not null)
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+        timeoutCts.CancelAfter(_upstreamTimeout);
+        try
+        {
+            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token);
+            var body = await resp.Content.ReadAsStringAsync(timeoutCts.Token);
+            if (resp.IsSuccessStatusCode)
+            {
+                ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+                ctx.Response.ContentType = "application/json; charset=utf-8";
+                await ctx.Response.WriteAsync(body, ctx.RequestAborted);
+            }
+            else
+            {
+                await WriteChatError(ctx, (int)resp.StatusCode, body);
+            }
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ctx.RequestAborted.IsCancellationRequested)
+        {
+            await WriteChatError(ctx, (int)HttpStatusCode.GatewayTimeout, "上游模型列表请求超时");
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"[models-err] {ex.Message}");
+            await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, ex.Message);
+        }
+    }
+
+    /// <summary>把内嵌 myrouter.ico 转 PNG 输出，保证页面 logo 与应用图标完全一致。</summary>
+    private async Task HandleLogoAsync(HttpContext ctx)
+    {
+        var ico = LoadEmbeddedResource("myrouter.ico");
+        if (ico is null)
+        {
+            ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
+            return;
+        }
+        byte[] png;
+        using (var ms = new MemoryStream(ico))
+        using (var icon = new Icon(ms))
+        using (var bmp = icon.ToBitmap())
+        using (var outMs = new MemoryStream())
+        {
+            bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
+            png = outMs.ToArray();
+        }
+        ctx.Response.ContentType = "image/png";
+        ctx.Response.Headers["Cache-Control"] = "public, max-age=86400";
+        await ctx.Response.Body.WriteAsync(png, ctx.RequestAborted);
+    }
+
+    /// <summary>
+    /// Web 聊天端点：转发到上游 /v1/chat/completions，SSE 流式回传浏览器。
+    /// 请求体 { model?, messages }；stream 固定 true，messages 原样透传（含 base64 多模态附件）。
+    /// 上游 key 统一用 GUI 配置的 _upstreamKey，Web 端不再管理 API Key。
+    /// </summary>
+    private async Task HandleChatAsync(HttpContext ctx)
+    {
+        string bodyText;
+        using (var reader = new StreamReader(ctx.Request.Body, Encoding.UTF8))
+            bodyText = await reader.ReadToEndAsync(ctx.RequestAborted);
+
+        JsonObject payload;
+        try
+        {
+            payload = (JsonNode.Parse(bodyText) as JsonObject)!;
+            if (payload is null || !payload.ContainsKey("messages"))
+            {
+                await WriteChatError(ctx, 400, "请求体需要 messages 字段");
+                return;
+            }
+        }
+        catch (JsonException)
+        {
+            await WriteChatError(ctx, 400, "请求体不是合法 JSON");
+            return;
+        }
+
+        // stream 固定 true（前端按 SSE 解析）；apiKey 是旧的 Web 管理 key 字段，一律忽略
+        payload.Remove("apiKey");
+        payload["stream"] = true;
+
+        // 长期记忆：采集短用户消息 → 自行整理 → 注入活跃记忆为 system 上下文
+        CollectAndInjectMemory(payload, DateTime.Now);
+
+        var json = payload.ToJsonString(ChatJsonOptions);
+        TrackStart(json.Length);
+        using var req = BuildUpstreamChatRequest(json);
+
+        if (_logRequests)
+            Log?.Invoke($"[chat-->] {req.RequestUri}");
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+        timeoutCts.CancelAfter(_upstreamTimeout);
+        try
+        {
+            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token);
+            if (!resp.IsSuccessStatusCode)
+            {
+                var errBody = await resp.Content.ReadAsStringAsync(timeoutCts.Token);
+                TrackEnd(resp.StatusCode, 0);
+                await WriteChatError(ctx, (int)resp.StatusCode, errBody);
+                return;
+            }
+
+            ctx.Response.StatusCode = (int)HttpStatusCode.OK;
+            ctx.Response.ContentType = "text/event-stream";
+            ctx.Response.Headers["Cache-Control"] = "no-cache";
+            await resp.Content.CopyToAsync(ctx.Response.Body, timeoutCts.Token);
+            TrackEnd(resp.StatusCode, resp.Content.Headers.ContentLength ?? 0);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ctx.RequestAborted.IsCancellationRequested)
+        {
+            // 上游超时：响应可能已开始写 SSE，只能追加错误事件收尾
+            Interlocked.Increment(ref _stats.Timeouts);
+            await WriteChatStreamError(ctx, "上游请求超时");
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"[chat-err] {ex.Message}");
+            await WriteChatStreamError(ctx, ex.Message);
+        }
+    }
+
+    private static async Task WriteChatError(HttpContext ctx, int status, string message)
+    {
+        if (!ctx.Response.HasStarted)
+        {
+            ctx.Response.StatusCode = status;
+            ctx.Response.ContentType = "application/json";
+            await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = message }, ChatJsonOptions), ctx.RequestAborted);
+        }
+    }
+
+    /// <summary>构造转发上游 /v1/chat/completions 的 POST 请求（统一 key；json 为已序列化的请求体）。</summary>
+    private HttpRequestMessage BuildUpstreamChatRequest(string json)
+    {
+        var req = new HttpRequestMessage(HttpMethod.Post, BuildUpstreamUrl("/v1/chat/completions", null))
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
+        if (_upstreamKey is not null)
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _upstreamKey);
+        return req;
+    }
+
+    /// <summary>
+    /// 长期记忆三步：记录最近模型 → 采集最后一条短用户消息（3-80 字符）→ 注入活跃记忆
+    /// 为 system 上下文（跨会话记忆，AI 据此记得用户信息）。
+    /// </summary>
+    private void CollectAndInjectMemory(JsonObject payload, DateTime now)
+    {
+        // 记录最近使用的模型：LLM 记忆整理复用它
+        if (payload.TryGetPropertyValue("model", out var mv) && mv is JsonValue mvv &&
+            mvv.TryGetValue<string>(out var mstr) && !string.IsNullOrWhiteSpace(mstr))
+            _lastModel = mstr;
+
+        if (payload["messages"] is not JsonArray arr || arr.Count == 0) return;
+
+        for (var i = arr.Count - 1; i >= 0; i--)
+        {
+            var msg = arr[i];
+            if (msg?["role"]?.GetValue<string>() != "user") continue;
+            if (msg["content"] is JsonValue v && v.TryGetValue<string>(out var s) &&
+                s.Length is >= 3 and <= 80)
+                _memory.Add(s, _lastModel);
+            break; // 只取最后一条用户消息
+        }
+
+        var mems = _memory.Top();
+        if (mems.Count == 0) return;
+        // 注入位置：紧跟用户自己的 system 提示词之后（用户提示词优先，记忆补充其后）
+        var insertAt = 0;
+        while (insertAt < arr.Count && arr[insertAt]?["role"]?.GetValue<string>() == "system")
+            insertAt++;
+        arr.Insert(insertAt, new JsonObject
+        {
+            ["role"] = "system",
+            ["content"] = "用户长期记忆（自动整理）：\n- " + string.Join("\n- ", mems),
+        });
+    }
+
+    /// <summary>
+    /// LLM 记忆整理器：把现有记忆 + 待整理片段发给上游，要求输出整理后的记忆 JSON。
+    /// 非流式、短超时；失败返回 null（调用方静默保留原记忆）。
+    /// </summary>
+    private async Task<List<string>?> RefineMemoriesAsync(
+        List<string> existing, List<string> pending, string? model, CancellationToken ct)
+    {
+        const string sys = "你是用户长期记忆整理器。合并现有记忆与新对话片段，输出精简后的记忆列表。\n" +
+                           "只保留稳定事实（偏好/身份/习惯/环境）；丢弃寒暄、一次性指令、无信息量内容；\n" +
+                           "语义重复的合并为一条；改写为简洁陈述句，每条≤80字；总数≤50条。\n" +
+                           "仅输出 JSON：{\"memories\":[\"...\", ...]}，不要任何其他文字。";
+        var user = "现有记忆：\n" +
+                   (existing.Count == 0 ? "（无）" : string.Join("\n", existing.Select(m => "- " + m))) +
+                   "\n\n新对话片段：\n" +
+                   string.Join("\n", pending.Select(m => "- " + m));
+
+        var payload = new JsonObject
+        {
+            ["stream"] = false,
+            ["x-memory-refine"] = true,   // 标记整理请求（上游一般忽略未知字段；mock 据此识别）
+            ["messages"] = new JsonArray(
+                new JsonObject { ["role"] = "system", ["content"] = sys },
+                new JsonObject { ["role"] = "user", ["content"] = user }),
+        };
+        if (!string.IsNullOrWhiteSpace(model)) payload["model"] = model;
+
+        using var req = BuildUpstreamChatRequest(payload.ToJsonString(ChatJsonOptions));
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        cts.CancelAfter(TimeSpan.FromSeconds(30));
+        try
+        {
+            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token);
+            if (!resp.IsSuccessStatusCode) return null;
+            var body = await resp.Content.ReadAsStringAsync(cts.Token);
+            using var doc = JsonDocument.Parse(body);
+            var content = doc.RootElement
+                .GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+            if (string.IsNullOrWhiteSpace(content)) return null;
+            var start = content.IndexOf('{');
+            var end = content.LastIndexOf('}');
+            if (start < 0 || end <= start) return null;
+            var parsed = JsonNode.Parse(content[start..(end + 1)]) as JsonObject;
+            var memories = parsed?["memories"] as JsonArray;
+            if (memories is null) return null;
+            var list = memories
+                .Where(n => n is not null)
+                .Select(n => n!.GetValue<string>())
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s.Trim())
+                .Where(s => s.Length <= 80)
+                .ToList();
+            return list.Count > 0 ? list : null;
+        }
+        catch
+        {
+            return null;   // 整理失败由调用方静默处理
+        }
+    }
+
+    private static async Task WriteChatStreamError(HttpContext ctx, string message)
+    {
+        if (!ctx.Response.HasStarted)
+        {
+            await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, message);
+            return;
+        }
+        // SSE 中追加 [DONE] 前先发 error 事件，前端据此中断渲染并展示
+        await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(new { error = message }, ChatJsonOptions)}\n\n", ctx.RequestAborted);
+    }
+
+    /// <summary>从程序集嵌入资源按文件名后缀读取，返回原始字节（ico/html 等）。</summary>
+    private static byte[]? LoadEmbeddedResource(string suffix)
+    {
+        var asm = typeof(ProxyServer).Assembly;
+        var name = asm.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+        if (name is null) return null;
+        using var stream = asm.GetManifestResourceStream(name);
+        if (stream is null) return null;
+        using var ms = new MemoryStream();
+        stream.CopyTo(ms);
+        return ms.ToArray();
+    }
+
     private async Task ForwardAsync(HttpContext ctx, CancellationToken token)
     {
         var path = ctx.Request.Path.Value ?? "";
         var qs = ctx.Request.QueryString.Value ?? "";
         var url = BuildUpstreamUrl(path, qs);
+
+        TrackStart(ctx.Request.ContentLength ?? 0);
 
         using var req = new HttpRequestMessage(new HttpMethod(ctx.Request.Method), url);
 
@@ -281,6 +642,8 @@ public class ProxyServer : IDisposable
                 ctx.Response.Headers[h.Key] = h.Value.ToArray();
             ctx.Response.Headers.Remove("Transfer-Encoding");
 
+            TrackEnd(resp.StatusCode, resp.Content.Headers.ContentLength ?? 0);
+
             if (_logRequests)
                 Log?.Invoke($"[<--] {ctx.Request.Method} {url} {resp.StatusCode}");
 
@@ -289,8 +652,25 @@ public class ProxyServer : IDisposable
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
         {
             // 上游超时（区别于客户端断开）→ 转 TimeoutException，由外层返回 504
+            Interlocked.Increment(ref _stats.Timeouts);
             throw new TimeoutException("上游请求超时");
         }
+    }
+
+    /// <summary>转发统计：请求计数 + 输入 token 粗估（按字节/3，非精确值）</summary>
+    private void TrackStart(long bodyLength)
+    {
+        Interlocked.Increment(ref _stats.Requests);
+        if (bodyLength > 0) Interlocked.Add(ref _stats.TokensIn, bodyLength / 3);
+    }
+
+    /// <summary>转发统计：结果归类 + 输出 token 粗估（按字节/3，非精确值）</summary>
+    private void TrackEnd(HttpStatusCode status, long outLength)
+    {
+        var code = (int)status;
+        if (code is >= 200 and < 300) Interlocked.Increment(ref _stats.Success);
+        else if (code >= 500) Interlocked.Increment(ref _stats.Errors);
+        if (outLength > 0) Interlocked.Add(ref _stats.TokensOut, outLength / 3);
     }
 
     private static string? ExtractLocalKey(HttpContext ctx)
