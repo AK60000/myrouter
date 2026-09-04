@@ -60,6 +60,7 @@ dotnet publish myrouter.csproj -c Release -r win-x64 --self-contained true -p:Pu
 | 上游地址 | 目标 API 的 base URL，可带 path | `https://openrouter.ai/api`、`https://api.openai.com/v1` |
 | 上游密钥 | 真实上游 key；留空 = 透传客户端 Authorization | `sk-or-v1-...` |
 | 端口 | 本地监听端口（默认 8080，1-65535） | `8080` |
+| 超时 (秒) | 上游请求超时（默认 1800，1-86400；SSE 长连接可调大） | `1800` |
 | 启用鉴权 | 关闭后任何请求都放行（仅内网调试用） | 勾选 |
 | 密钥 | 客户端访问本地服务所用的 key | `my-local-key` |
 | 记录每个请求 | 在日志区打印请求 URL 与状态码（生产建议关闭） | 不勾选 |
@@ -115,7 +116,7 @@ myrouter/
 # 一次构建全部三个项目
 dotnet build myrouter.slnx -c Release
 
-# 冒烟测试（mock 上游，不需网络）：鉴权、透传、路径去重的 11 个场景
+# 冒烟测试（mock 上游，不需网络）：鉴权、透传、路径去重、gzip 透传、超时等 14 个场景
 dotnet run --project tests/myrouter.SmokeTest
 
 # 真实集成测试（需网络与上游 key）

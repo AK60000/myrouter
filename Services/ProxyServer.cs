@@ -21,11 +21,21 @@ namespace myrouter.Services;
 public class ProxyServer : IDisposable
 {
     private const int StatusClientClosedRequest = 499; // nginx 私有码：客户端提前断开
+    // 请求体防御性上限：LLM 请求体通常很小（含 base64 图片也就几 MB），512MB 足够且防内存耗尽
+    private const long MaxRequestBodyBytes = 512L * 1024 * 1024;
 
-    private readonly HttpClient _http = new()
+    // 透明代理：必须原样透传上游响应（含 Content-Encoding/Content-Length），
+    // 因此禁掉 HttpClient 的自动解压——自动解压会解掉 gzip 但保留压缩前长度，破坏响应语义。
+    // Timeout 用 Infinite：超时按请求配置走 ForwardAsync 里的 linked CTS（HttpClient.Timeout 只能设一次）
+    private readonly HttpClient _http = new(new HttpClientHandler
     {
-        Timeout = TimeSpan.FromMinutes(30),
+        AutomaticDecompression = DecompressionMethods.None,
+    })
+    {
+        Timeout = Timeout.InfiniteTimeSpan,
     };
+
+    private TimeSpan _upstreamTimeout = TimeSpan.FromSeconds(AppConfig.DefaultUpstreamTimeoutSeconds);
 
     private WebApplication? _app;
     private readonly object _lock = new();
@@ -53,6 +63,9 @@ public class ProxyServer : IDisposable
                 throw new ArgumentException("上游 URL 格式不正确（需 http/https）");
             if (cfg.Port < AppConfig.MinPort || cfg.Port > AppConfig.MaxPort)
                 throw new ArgumentException($"端口范围应为 {AppConfig.MinPort}-{AppConfig.MaxPort}");
+            if (cfg.UpstreamTimeoutSeconds < AppConfig.MinUpstreamTimeoutSeconds ||
+                cfg.UpstreamTimeoutSeconds > AppConfig.MaxUpstreamTimeoutSeconds)
+                throw new ArgumentException($"上游超时范围应为 {AppConfig.MinUpstreamTimeoutSeconds}-{AppConfig.MaxUpstreamTimeoutSeconds} 秒");
             if (cfg.RequireAuth && string.IsNullOrEmpty(cfg.ApiKey))
                 throw new ArgumentException("启用鉴权时必须设置 API Key");
         }
@@ -62,6 +75,7 @@ public class ProxyServer : IDisposable
         var requireAuth = cfg.RequireAuth;
         _logRequests = cfg.LogRequests;
         _upstreamKey = string.IsNullOrEmpty(cfg.UpstreamApiKey) ? null : cfg.UpstreamApiKey;
+        _upstreamTimeout = TimeSpan.FromSeconds(cfg.UpstreamTimeoutSeconds);
 
         // 上游 origin 与 path 段是启动时固定值，预计算避免每请求重建
         var uri = new Uri(upstream);
@@ -77,7 +91,7 @@ public class ProxyServer : IDisposable
         builder.Services.Configure<KestrelServerOptions>(o =>
         {
             o.ListenLocalhost(cfg.Port);
-            o.Limits.MaxRequestBodySize = null;
+            o.Limits.MaxRequestBodySize = MaxRequestBodyBytes;
         });
 
         var app = builder.Build();
@@ -129,6 +143,15 @@ public class ProxyServer : IDisposable
             try
             {
                 await ForwardAsync(ctx, token);
+            }
+            catch (TimeoutException)
+            {
+                // 上游超时（ForwardAsync 里已区分：客户端断开走 OCE→499）
+                if (!ctx.Response.HasStarted)
+                {
+                    ctx.Response.StatusCode = (int)HttpStatusCode.GatewayTimeout; // 504
+                    await ctx.Response.WriteAsync("Upstream timeout");
+                }
             }
             catch (OperationCanceledException)
             {
@@ -243,20 +266,31 @@ public class ProxyServer : IDisposable
         if (_logRequests)
             Log?.Invoke($"[-->] {ctx.Request.Method} {url}");
 
-        using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, token);
+        // 每请求独立超时：linked CTS 让客户端断开(token)与超时两种取消可区分
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeoutCts.CancelAfter(_upstreamTimeout);
+        try
+        {
+            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token);
 
-        ctx.Response.StatusCode = (int)resp.StatusCode;
+            ctx.Response.StatusCode = (int)resp.StatusCode;
 
-        foreach (var h in resp.Headers)
-            ctx.Response.Headers[h.Key] = h.Value.ToArray();
-        foreach (var h in resp.Content.Headers)
-            ctx.Response.Headers[h.Key] = h.Value.ToArray();
-        ctx.Response.Headers.Remove("Transfer-Encoding");
+            foreach (var h in resp.Headers)
+                ctx.Response.Headers[h.Key] = h.Value.ToArray();
+            foreach (var h in resp.Content.Headers)
+                ctx.Response.Headers[h.Key] = h.Value.ToArray();
+            ctx.Response.Headers.Remove("Transfer-Encoding");
 
-        if (_logRequests)
-            Log?.Invoke($"[<--] {ctx.Request.Method} {url} {resp.StatusCode}");
+            if (_logRequests)
+                Log?.Invoke($"[<--] {ctx.Request.Method} {url} {resp.StatusCode}");
 
-        await resp.Content.CopyToAsync(ctx.Response.Body, token);
+            await resp.Content.CopyToAsync(ctx.Response.Body, timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !token.IsCancellationRequested)
+        {
+            // 上游超时（区别于客户端断开）→ 转 TimeoutException，由外层返回 504
+            throw new TimeoutException("上游请求超时");
+        }
     }
 
     private static string? ExtractLocalKey(HttpContext ctx)

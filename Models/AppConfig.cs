@@ -8,12 +8,16 @@ public class AppConfig
 {
     public const int MinPort = 1;
     public const int MaxPort = 65535;
+    public const int MinUpstreamTimeoutSeconds = 1;
+    public const int MaxUpstreamTimeoutSeconds = 86400; // 24h，SSE 长连接留足余量
+    public const int DefaultUpstreamTimeoutSeconds = 1800; // 30min
     public const string DefaultUpstreamUrl = "https://api.openai.com";
     public const int DefaultPort = 8080;
     public const string XApiKeyHeader = "x-api-key";
 
     public string UpstreamUrl { get; set; } = DefaultUpstreamUrl;
     public string UpstreamApiKey { get; set; } = "";
+    public int UpstreamTimeoutSeconds { get; set; } = DefaultUpstreamTimeoutSeconds;
     public int Port { get; set; } = DefaultPort;
     public string ApiKey { get; set; } = "";
     public bool RequireAuth { get; set; } = true;

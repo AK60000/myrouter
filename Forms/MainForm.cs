@@ -15,6 +15,7 @@ public class MainForm : Form
     private readonly TextBox _txtUpstreamKey = new();
     private readonly CheckBox _chkShowUpstreamKey = new();
     private readonly NumericUpDown _numPort = new();
+    private readonly NumericUpDown _numTimeout = new();
     private readonly CheckBox _chkAuth = new();
     private readonly TextBox _txtKey = new();
     private readonly CheckBox _chkShowKey = new();
@@ -168,7 +169,7 @@ public class MainForm : Form
         var cfg = new TableLayoutPanel
         {
             ColumnCount = 3,
-            RowCount = 8,
+            RowCount = 9,
             AutoSize = true,
             Dock = DockStyle.Fill,
         };
@@ -207,34 +208,44 @@ public class MainForm : Form
         _numPort.Margin = new Padding(0, 4, 0, 4);
         cfg.Controls.Add(_numPort, 1, 2);
 
-        // Row 3: 鉴权 checkbox
-        cfg.Controls.Add(MakeLabel(""), 0, 3);
+        // Row 3: 上游超时（秒）
+        cfg.Controls.Add(MakeLabel("超时 (秒)"), 0, 3);
+        _numTimeout.Dock = DockStyle.Left;
+        _numTimeout.Minimum = AppConfig.MinUpstreamTimeoutSeconds;
+        _numTimeout.Maximum = AppConfig.MaxUpstreamTimeoutSeconds;
+        _numTimeout.Value = AppConfig.DefaultUpstreamTimeoutSeconds;
+        _numTimeout.Width = 120;
+        _numTimeout.Margin = new Padding(0, 4, 0, 4);
+        cfg.Controls.Add(_numTimeout, 1, 3);
+
+        // Row 4: 鉴权 checkbox
+        cfg.Controls.Add(MakeLabel(""), 0, 4);
         _chkAuth.Text = "启用鉴权（校验本地 API Key）";
         _chkAuth.AutoSize = true;
         _chkAuth.Margin = new Padding(0, 8, 0, 4);
         _chkAuth.CheckedChanged += (_, _) => UpdateAuthEnabled();
-        cfg.Controls.Add(_chkAuth, 1, 3);
+        cfg.Controls.Add(_chkAuth, 1, 4);
         cfg.SetColumnSpan(_chkAuth, 2);
 
-        // Row 4: 密钥
-        cfg.Controls.Add(MakeLabel("密钥"), 0, 4);
+        // Row 5: 密钥
+        cfg.Controls.Add(MakeLabel("密钥"), 0, 5);
         _txtKey.Dock = DockStyle.Fill;
         _txtKey.UseSystemPasswordChar = true;
         _txtKey.PlaceholderText = "客户端用此 Key 访问本地服务";
         _txtKey.Margin = new Padding(0, 4, 0, 4);
-        cfg.Controls.Add(_txtKey, 1, 4);
+        cfg.Controls.Add(_txtKey, 1, 5);
         _chkShowKey.Text = "显示";
         _chkShowKey.AutoSize = true;
         _chkShowKey.Margin = new Padding(8, 4, 0, 4);
         WireShowPasswordToggle(_txtKey, _chkShowKey);
-        cfg.Controls.Add(_chkShowKey, 2, 4);
+        cfg.Controls.Add(_chkShowKey, 2, 5);
 
-        // Row 5: 记录请求 checkbox + hint
-        cfg.Controls.Add(MakeLabel(""), 0, 5);
+        // Row 6: 记录请求 checkbox + hint
+        cfg.Controls.Add(MakeLabel(""), 0, 6);
         _chkLog.Text = "记录每个请求";
         _chkLog.AutoSize = true;
         _chkLog.Margin = new Padding(0, 4, 0, 4);
-        cfg.Controls.Add(_chkLog, 1, 5);
+        cfg.Controls.Add(_chkLog, 1, 6);
         var lblLogHint = new Label
         {
             Text = "（生产环境建议关闭，影响性能）",
@@ -242,14 +253,14 @@ public class MainForm : Form
             ForeColor = Color.Gray,
             Margin = new Padding(8, 6, 0, 4),
         };
-        cfg.Controls.Add(lblLogHint, 2, 5);
+        cfg.Controls.Add(lblLogHint, 2, 6);
 
-        // Row 6: separator
+        // Row 7: separator
         var sep = new Panel { Dock = DockStyle.Top, Height = 10 };
-        cfg.Controls.Add(sep, 0, 6);
+        cfg.Controls.Add(sep, 0, 7);
         cfg.SetColumnSpan(sep, 3);
 
-        // Row 7: buttons
+        // Row 8: buttons
         var btns = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
@@ -268,7 +279,7 @@ public class MainForm : Form
         _btnSave.Size = new Size(120, 40);
         _btnSave.Click += (_, _) => SaveConfigWithFeedback();
         btns.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnSave });
-        cfg.Controls.Add(btns, 0, 7);
+        cfg.Controls.Add(btns, 0, 8);
         cfg.SetColumnSpan(btns, 3);
 
         root.Controls.Add(cfg, 0, 0);
@@ -350,6 +361,8 @@ public class MainForm : Form
         _txtUpstream.Text = c.UpstreamUrl;
         _txtUpstreamKey.Text = c.UpstreamApiKey;
         _numPort.Value = Math.Clamp(c.Port, AppConfig.MinPort, AppConfig.MaxPort);
+        _numTimeout.Value = Math.Clamp(c.UpstreamTimeoutSeconds,
+            AppConfig.MinUpstreamTimeoutSeconds, AppConfig.MaxUpstreamTimeoutSeconds);
         _chkAuth.Checked = c.RequireAuth;
         _txtKey.Text = c.ApiKey;
         _chkLog.Checked = c.LogRequests;
@@ -361,6 +374,7 @@ public class MainForm : Form
         UpstreamUrl = _txtUpstream.Text.Trim(),
         UpstreamApiKey = _txtUpstreamKey.Text.Trim(),
         Port = (int)_numPort.Value,
+        UpstreamTimeoutSeconds = (int)_numTimeout.Value,
         RequireAuth = _chkAuth.Checked,
         ApiKey = _txtKey.Text.Trim(),
         LogRequests = _chkLog.Checked,

@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -34,6 +35,33 @@ internal static class Program
                     using var sr = new StreamReader(ctx.Request.InputStream);
                     reqBody = await sr.ReadToEndAsync();
                 }
+
+                // /slow 特殊路径：模拟上游响应缓慢，用于验证超时配置生效
+                if (path == "/slow")
+                {
+                    await Task.Delay(3000);
+                    var slowBytes = System.Text.Encoding.UTF8.GetBytes("slow-response");
+                    ctx.Response.ContentLength64 = slowBytes.Length;
+                    await ctx.Response.OutputStream.WriteAsync(slowBytes);
+                    ctx.Response.Close();
+                    continue;
+                }
+
+                // /gzip 特殊路径：模拟上游返回 gzip 压缩响应
+                if (path == "/gzip")
+                {
+                    var plain = "compressed-payload";
+                    using var ms = new MemoryStream();
+                    using (var gz = new GZipStream(ms, CompressionMode.Compress, leaveOpen: true))
+                        gz.Write(System.Text.Encoding.UTF8.GetBytes(plain));
+                    var gzBytes = ms.ToArray();
+                    ctx.Response.AddHeader("Content-Encoding", "gzip");
+                    ctx.Response.ContentLength64 = gzBytes.Length;
+                    await ctx.Response.OutputStream.WriteAsync(gzBytes);
+                    ctx.Response.Close();
+                    continue;
+                }
+
                 var resp = $"upstream got {ctx.Request.HttpMethod} {path}{query}; headers=[{headers}]; body={reqBody}";
                 var bytes = System.Text.Encoding.UTF8.GetBytes(resp);
                 ctx.Response.ContentLength64 = bytes.Length;
@@ -192,6 +220,48 @@ internal static class Program
                 return ok ? null : $"body={body}";
             });
 
+        // ── Case 13: 上游 gzip 压缩响应原样透传（含 Content-Encoding 头） ──
+        await RunCase(proxy, http, "Gzip upstream response passed through intact",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = false,
+            }, async h =>
+            {
+                var req = new HttpRequestMessage(HttpMethod.Get, $"http://localhost:{proxyPort}/gzip");
+                req.Headers.TryAddWithoutValidation("Accept-Encoding", "gzip");
+                var r = await h.SendAsync(req);
+                var body = await r.Content.ReadAsByteArrayAsync();
+                // 期望: Content-Encoding: gzip 原样透传，body 仍是压缩字节（解压后 = compressed-payload）
+                var enc = r.Content.Headers.ContentEncoding.ToString() ?? "";
+                using var ms = new MemoryStream(body);
+                using var gz = new GZipStream(ms, CompressionMode.Decompress);
+                using var sr = new StreamReader(gz);
+                var plain = await sr.ReadToEndAsync();
+                var ok = r.StatusCode == HttpStatusCode.OK
+                    && enc.Contains("gzip", StringComparison.OrdinalIgnoreCase)
+                    && plain == "compressed-payload";
+                return ok ? null : $"status={r.StatusCode} enc={enc} plain={plain}";
+            });
+
+        // ── Case 14: 上游超时配置生效 → 504 GatewayTimeout ──
+        await RunCase(proxy, http, "Upstream timeout (1s) → 504",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = false,
+                UpstreamTimeoutSeconds = 1,
+            }, async h =>
+            {
+                // mock 上游 /slow 延迟 3 秒，1 秒超时必然触发
+                var r = await h.GetAsync($"http://localhost:{proxyPort}/slow");
+                return r.StatusCode == HttpStatusCode.GatewayTimeout
+                    ? null
+                    : $"should be 504, got {r.StatusCode}";
+            });
+
         // ── Case 8: 前缀去重 ─ upstream=/v1, client=/v1/chat/completions → /v1/chat/completions ──
         await RunCase(proxy, http, "Prefix dedup: /v1 + /v1/chat/completions → /v1/chat/completions",
             new AppConfig
@@ -265,14 +335,18 @@ internal static class Program
         proxy.Dispose();
         upstream.Stop();
         upstreamTask.Wait(TimeSpan.FromSeconds(2));
-        Console.WriteLine("\n冒烟测试完成。");
-        return 0;
+        Console.WriteLine(_failures == 0
+            ? "\n冒烟测试完成，全部通过。"
+            : $"\n冒烟测试完成，{_failures} 个用例失败。");
+        return _failures == 0 ? 0 : 1;
     }
 
     /// <summary>
     /// 重启 proxy（停旧实例 → 用给定配置启动），执行测试 lambda。
     /// test 返回 null = 通过；返回非 null = 失败原因。
     /// </summary>
+    private static int _failures;
+
     private static async Task RunCase(
         ProxyServer proxy, HttpClient http, string name, AppConfig cfg,
         Func<HttpClient, Task<string?>> test)
@@ -283,10 +357,12 @@ internal static class Program
             await proxy.StartAsync(cfg);
             var fail = await test(http);
             Console.WriteLine(fail is null ? $"[OK] {name}" : $"[FAIL] {name}: {fail}");
+            if (fail is not null) _failures++;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[FAIL] {name}: {ex.Message}");
+            _failures++;
         }
     }
 }
