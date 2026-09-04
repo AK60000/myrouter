@@ -79,7 +79,8 @@ curl http://localhost:8080/v1/chat/completions \
 
 - 本地鉴权认两种头，任一即可：`Authorization: Bearer <key>`、`x-api-key: <key>`
 - 鉴权失败返回 `401` + `WWW-Authenticate: Bearer`，日志显示诊断（"Authorization 头长度 N" / "x-api-key 头长度 N" / "两个鉴权头都没有"）——用于排查客户端 header 格式，**不暴露 key 值**
-- 上游密钥替换只影响转发出去的 Authorization 头，x-api-key 与自定义头原样透传
+- 上游密钥替换只影响转发出去的 Authorization 头（替换为 `Bearer <上游key>`）；自定义头原样透传
+- **配置了上游密钥时，本地鉴权用的 `x-api-key` 头会被剥离，不会转发给上游**（防止本地 key 泄露）；未配置上游密钥的透传模式下才原样透传
 
 ## 路径拼接规则
 

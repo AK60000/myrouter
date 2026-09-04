@@ -223,6 +223,9 @@ public class ProxyServer : IDisposable
             if (IsHopByHop(h.Key, connectionTokens)) continue;
             if (h.Key.Equals("Host", StringComparison.OrdinalIgnoreCase)) continue;
             if (h.Key.Equals("Content-Length", StringComparison.OrdinalIgnoreCase)) continue;
+            // 配置了上游密钥时，本地鉴权用的 x-api-key 不能透传给上游（会泄露本地 key）
+            if (_upstreamKey is not null &&
+                h.Key.Equals(AppConfig.XApiKeyHeader, StringComparison.OrdinalIgnoreCase)) continue;
             if (!req.Headers.TryAddWithoutValidation(h.Key, h.Value.ToArray()))
             {
                 if (req.Content is not null)

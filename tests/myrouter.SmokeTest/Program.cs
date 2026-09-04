@@ -169,6 +169,29 @@ internal static class Program
                 return ok ? null : $"body={body}";
             });
 
+        // ── Case 12: 配置上游密钥时，本地鉴权用的 x-api-key 必须被剥离，不泄露给上游 ──
+        await RunCase(proxy, http, "Upstream key set → client's x-api-key stripped before forwarding",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = true,
+                ApiKey = "local-key",
+                UpstreamApiKey = "sk-real-upstream-key",
+            }, async h =>
+            {
+                // 用 x-api-key 走本地鉴权；Authorization 不该出现（否则会带本地 key）
+                var req = new HttpRequestMessage(HttpMethod.Get, $"http://localhost:{proxyPort}/v1/models");
+                req.Headers.TryAddWithoutValidation("x-api-key", "local-key");
+                var r = await h.SendAsync(req);
+                var body = await r.Content.ReadAsStringAsync();
+                // 期望: 上游收到 Authorization=[Bearer sk-real-upstream-key]，且完全没有 x-api-key
+                var ok = r.StatusCode == HttpStatusCode.OK
+                    && body.Contains("Authorization=[Bearer sk-real-upstream-key]")
+                    && !body.Contains("x-api-key");
+                return ok ? null : $"body={body}";
+            });
+
         // ── Case 8: 前缀去重 ─ upstream=/v1, client=/v1/chat/completions → /v1/chat/completions ──
         await RunCase(proxy, http, "Prefix dedup: /v1 + /v1/chat/completions → /v1/chat/completions",
             new AppConfig
