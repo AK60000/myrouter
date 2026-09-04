@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/myrouter.OpenRouterTest/myrouter.OpenRouterTest.csproj" />
+    <Project Path="tests/myrouter.SmokeTest/myrouter.SmokeTest.csproj" />
+  </Folder>
+  <Project Path="myrouter.csproj" />
+</Solution>

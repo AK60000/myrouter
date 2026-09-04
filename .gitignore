@@ -1,0 +1,15 @@
+# build output
+bin/
+obj/
+
+# runtime config — contains API keys, never commit
+myrouter.config.json
+
+# tool-generated previews
+tools/_preview/
+
+# IDE / OS
+.vs/
+.vscode/
+*.user
+.DS_Store
