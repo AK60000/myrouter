@@ -403,7 +403,7 @@ public class ProxyServer : IDisposable
 
         string? content;
         if (payload["messages"] is JsonArray msgs && msgs.Count > 0)
-            content = await GenerateAgentProfileAsync(msgs);
+            content = await GenerateAgentProfileAsync(msgs, payload["model"]?.GetValue<string>());
         else if (payload["content"] is JsonValue cv && cv.TryGetValue<string>(out var s))
             content = s;
         else
@@ -521,9 +521,10 @@ public class ProxyServer : IDisposable
             await WriteChatError(ctx, 400, "需要 messages（标题总结）");
             return;
         }
+        var model = payload?["model"]?.GetValue<string>();
         var title = await AskUpstreamAsync(
             "为这段对话生成标题，不超过 20 字，不加标点与引号，直接输出标题。",
-            MessagesToText(msgs), "x-title-refine");
+            MessagesToText(msgs), "x-title-refine", model);
         if (title is null)
         {
             await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, "标题生成失败（请检查上游配置与 key）");
@@ -545,7 +546,7 @@ public class ProxyServer : IDisposable
     }
 
     /// <summary>让上游 LLM 合并现有画像与最新对话，输出新版 agent.md；失败返回 null。</summary>
-    private async Task<string?> GenerateAgentProfileAsync(JsonArray messages)
+    private async Task<string?> GenerateAgentProfileAsync(JsonArray messages, string? model)
     {
         const string sys = "你是用户画像维护器。合并现有画像与最新对话，输出新版 agent.md。\n" +
                            "只保留稳定事实（身份/偏好/习惯/环境）；丢弃寒暄与一次性指令；\n" +
@@ -553,11 +554,11 @@ public class ProxyServer : IDisposable
         var existing = ReadAgentProfile();
         var user = "现有画像：\n" + (string.IsNullOrWhiteSpace(existing) ? "（无）" : existing) +
                    "\n\n最新对话：\n" + MessagesToText(messages);
-        return await AskUpstreamAsync(sys, user, "x-agent-refine");
+        return await AskUpstreamAsync(sys, user, "x-agent-refine", model);
     }
 
     /// <summary>调用上游非流式补全，返回 assistant 正文；失败返回 null。</summary>
-    private async Task<string?> AskUpstreamAsync(string system, string user, string marker)
+    private async Task<string?> AskUpstreamAsync(string system, string user, string marker, string? model)
     {
         var payload = new JsonObject
         {
@@ -567,6 +568,7 @@ public class ProxyServer : IDisposable
                 new JsonObject { ["role"] = "system", ["content"] = system },
                 new JsonObject { ["role"] = "user", ["content"] = user }),
         };
+        if (!string.IsNullOrWhiteSpace(model)) payload["model"] = model;   // 真实上游缺 model 会 400
         using var req = BuildUpstreamChatRequest(payload.ToJsonString(JsonOpts.Unsafe));
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
         cts.CancelAfter(_upstreamTimeout);   // 跟随 GUI 配置的上游超时（慢模型下固定 30s 会误杀）
@@ -587,8 +589,17 @@ public class ProxyServer : IDisposable
         string.Join("\n", messages.Select(m =>
         {
             var role = m?["role"]?.GetValue<string>() ?? "?";
-            return $"[{role}] {ConversationStore.ContentToText(m?["content"])}";
+            // 剥离思维链后入提炼输入：历史里可能混入早期版本未剔除的 <thinking>/thinking 块
+            return $"[{role}] {StripThinking(ConversationStore.ContentToText(m?["content"]))}";
         }));
+
+    /// <summary>剥离思维链标签（与前端 splitThinking 同语义：&lt;thinking&gt;…&lt;/thinking&gt; 与 thinking…response，支持未闭合）。</summary>
+    private static string StripThinking(string text)
+    {
+        text = System.Text.RegularExpressions.Regex.Replace(text, "<thinking>(?s:.*?)</thinking>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        text = System.Text.RegularExpressions.Regex.Replace(text, "\\s*thinking[\\s\\S]*?(?:\\s*response|$)", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return text.Trim();
+    }
 
     private static async Task<JsonObject?> ReadBodyJsonAsync(HttpContext ctx)
     {

@@ -941,7 +941,8 @@ $("btnAgentGen").addEventListener("click", async () => {
   $("btnAgentGen").disabled = true;
   $("btnAgentGen").textContent = "生成中…";
   try {
-    const content = await agentPost({ messages });
+    // 带当前模型：上游对缺 model 的请求会 400
+    const content = await agentPost({ messages, model: modelSelect.value || undefined });
     agentInput.value = content;
     agentNoteShow("已根据对话更新画像并保存", "ok");
   } catch (e) { agentNoteShow("生成失败：" + e.message, "err"); }
@@ -1011,7 +1012,7 @@ async function summarizeTitle() {
     await fetch("/conversations/" + activeId + "/title", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ messages: textOnly }),
+      body: JSON.stringify({ messages: textOnly, model: modelSelect.value || undefined }),
     });
     convListLoad();
   } catch { /* 总结失败静默，保留自动截取的标题 */ }

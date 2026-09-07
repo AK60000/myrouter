@@ -66,9 +66,20 @@ internal static class Program
                 }
 
                 // /v1/chat/completions POST：AI 画像提炼请求（body 带 x-agent-refine 标记）→ 返回非流式画像
+                // （真实上游缺 model 会 400，这里同样校验；思维链须在提炼前剥离，否则画像会被污染）
                 if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST" &&
                     reqBody.Contains("x-agent-refine"))
                 {
+                    if (!reqBody.Contains("\"model\"") || reqBody.Contains("thinking"))
+                    {
+                        var eBytes = System.Text.Encoding.UTF8.GetBytes("{\"error\":\"model required or thinking not stripped\"}");
+                        ctx.Response.ContentType = "application/json";
+                        ctx.Response.StatusCode = 400;
+                        ctx.Response.ContentLength64 = eBytes.Length;
+                        await ctx.Response.OutputStream.WriteAsync(eBytes);
+                        ctx.Response.Close();
+                        continue;
+                    }
                     const string agentJson =
                         "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"我是 Bobby，喜欢喝咖啡。\\n我在学 Spring Boot。\"}}]}";
                     var aBytes = System.Text.Encoding.UTF8.GetBytes(agentJson);
@@ -83,6 +94,16 @@ internal static class Program
                 if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST" &&
                     reqBody.Contains("x-title-refine"))
                 {
+                    if (!reqBody.Contains("\"model\""))
+                    {
+                        var eBytes = System.Text.Encoding.UTF8.GetBytes("{\"error\":\"model is required\"}");
+                        ctx.Response.ContentType = "application/json";
+                        ctx.Response.StatusCode = 400;
+                        ctx.Response.ContentLength64 = eBytes.Length;
+                        await ctx.Response.OutputStream.WriteAsync(eBytes);
+                        ctx.Response.Close();
+                        continue;
+                    }
                     const string titleJson =
                         "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"和小李的对话\"}}]}";
                     var tBytes = System.Text.Encoding.UTF8.GetBytes(titleJson);
@@ -506,8 +527,9 @@ internal static class Program
                 if (!b2.Contains("我住在深圳"))
                     return $"saved content not persisted: {b2[..Math.Min(160, b2.Length)]}";
 
-                // 4) POST messages → AI 提炼（mock 返回固定画像），返回并覆盖文件
-                var r3 = await post("{\"messages\":[{\"role\":\"user\",\"content\":\"我最近在学 Spring Boot\"}]}");
+                // 4) POST messages → AI 提炼（携带 model 与真实前端一致；消息里故意带 <thinking> 思维链块，
+                //    mock 校验其已被服务端剥离后才放行），返回并覆盖文件
+                var r3 = await post("{\"model\":\"mock-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"我最近在学 Spring Boot\"},{\"role\":\"assistant\",\"content\":\"我也喜欢<thinking>其实也很喜欢写代码</thinking>编程\"}]}");
                 var b3 = await r3.Content.ReadAsStringAsync();
                 if (r3.StatusCode != HttpStatusCode.OK || !b3.Contains("喜欢喝咖啡") || !b3.Contains("Spring Boot"))
                     return $"AI generate failed: {r3.StatusCode} {b3[..Math.Min(200, b3.Length)]}";
@@ -557,9 +579,9 @@ internal static class Program
                 if (!b3.Contains("\"title\":\"你好，我叫小李\"") || !b3.Contains("\"id\":\"" + cid))
                     return $"list missing camelCase fields: {b3[..Math.Min(200, b3.Length)]}";
 
-                // 4.5) LLM 总结标题覆盖自动截取（mock 返回固定标题）
+                // 4.5) LLM 总结标题覆盖自动截取（mock 返回固定标题；携带 model，与真实前端一致）
                 var r4 = await h.PostAsync($"http://localhost:{proxyPort}/conversations/{cid}/title",
-                    new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"你好，我叫小李\"}]}",
+                    new StringContent("{\"model\":\"mock-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"你好，我叫小李\"}]}",
                         System.Text.Encoding.UTF8, "application/json"));
                 var b4b = await r4.Content.ReadAsStringAsync();
                 if (r4.StatusCode != HttpStatusCode.OK || !b4b.Contains("和小李的对话"))
