@@ -98,15 +98,15 @@ public class Companion
     {
         var hour = now.Hour;
         // 深夜：只劝睡，不播统计（简洁克制）
-        if (hour is 23 or 0 or 1) return "夜深了，早点休息，别让代理替你熬夜 💤";
-        if (hour is >= 2 and < 6) return "凌晨还在折腾？快去睡吧，明天再战 🛌";
+        if (hour is 23 or 0 or 1) return "夜深了，早点休息，别让代理替你熬夜";
+        if (hour is >= 2 and < 6) return "凌晨还在折腾？快去睡吧，明天再战";
 
         var greeting = hour switch
         {
-            >= 6 and < 11 => "早上好 ☀️",
-            >= 11 and < 13 => "中午好 🍚",
+            >= 6 and < 11 => "早上好",
+            >= 11 and < 13 => "中午好",
             >= 13 and < 18 => "下午好",
-            _ => "晚上好 🌙",
+            _ => "晚上好",
         };
 
         var parts = new List<string> { greeting };

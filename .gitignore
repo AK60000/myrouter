@@ -9,6 +9,9 @@ artifacts/
 # tool-generated previews
 tools/_preview/
 
+# 第三方依赖打包 node_modules（tools/vendor/build.mjs 可重新安装；产物 vendor.bundle.js 需提交）
+tools/vendor/node_modules/
+
 # IDE / OS
 .vs/
 .vscode/

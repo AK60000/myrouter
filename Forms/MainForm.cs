@@ -125,13 +125,17 @@ public class MainForm : Form
         _tray.Visible = false;
     }
 
-    private void ExitApp()
+    private async void ExitApp()
     {
+        if (_reallyExit) return;
         if (_proxy.IsRunning)
         {
             var r = MessageBox.Show("服务正在运行，确定退出？", "myrouter",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (r != DialogResult.Yes) return;
+            // 异步优雅停止：同步等待会卡死 UI 线程（StopAsync 的 await 续体要回 UI 线程执行，
+            // 而 UI 线程被 GetResult 堵住 → 互相等 → 进程永不退出，即"幽灵进程"根因）
+            await _proxy.StopAsync();
         }
         SaveConfigSilent();
         _companion.Snapshot(DateTime.Now);
@@ -299,10 +303,10 @@ public class MainForm : Form
         _btnStop.Size = new Size(100, 40);
         _btnStop.Enabled = false;
         _btnStop.Click += BtnStop_Click;
-        _btnSave.Text = "💾 保存配置";
+        _btnSave.Text = "保存配置";
         _btnSave.Size = new Size(120, 40);
         _btnSave.Click += (_, _) => SaveConfigWithFeedback();
-        _btnWeb.Text = "🌐 打开 Web";
+        _btnWeb.Text = "打开 Web";
         _btnWeb.Size = new Size(110, 40);
         _btnWeb.Click += BtnWeb_Click;
         btns.Controls.AddRange(new Control[] { _btnStart, _btnStop, _btnSave, _btnWeb });
@@ -401,7 +405,7 @@ public class MainForm : Form
         _lblSay.Margin = new Padding(2, 5, 4, 0);
         bar.Controls.Add(_lblSay, 1, 0);
 
-        _btnMute.Text = "🔕 静音";
+        _btnMute.Text = "静音";
         _btnMute.AutoSize = true;
         _btnMute.Height = 28;
         _btnMute.Margin = new Padding(4, 6, 0, 0);
@@ -439,7 +443,7 @@ public class MainForm : Form
             _themeDark = dark;
             ThemeManager.Apply(this, dark);
             ApplyStatusColor();
-            _companion.Speak(dark ? "切入夜晚模式 🌙" : "切入白天模式 ☀️");
+            _companion.Speak(dark ? "切入夜晚模式" : "切入白天模式");
         }
 
         // 深夜（23:00-05:59）不做随机搭话；整点播报交给 BuildMessage——深夜自动只出劝睡文案
@@ -467,8 +471,8 @@ public class MainForm : Form
     private void ToggleMute()
     {
         _companion.SetMuted(!_companion.Muted);
-        _btnMute.Text = _companion.Muted ? "🔔 恢复" : "🔕 静音";
-        if (!_companion.Muted) _companion.Speak("好啦，重新开始唠叨 🙂");
+        _btnMute.Text = _companion.Muted ? "恢复" : "静音";
+        if (!_companion.Muted) _companion.Speak("好啦，重新开始唠叨");
     }
 
     private void BtnWeb_Click(object? sender, EventArgs e)

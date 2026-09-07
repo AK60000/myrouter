@@ -20,7 +20,7 @@
 - **完整透传**：路径、查询字符串、请求体、自定义头全部转发
 - **流式响应**：SSE 流式（streaming）原生支持，边收边转
 - **CORS 支持**：浏览器直连无跨域限制，含预检（OPTIONS）处理
-- **Web 界面**：启动后访问 `http://localhost:8080/` 即打开内置聊天页，单会话流式对话，支持文件上传（图片走多模态、其他类型转 base64 附件）；聊天请求复用 GUI 配置的上游密钥，也可在页面设置里单独填
+- **Web 界面**：启动后访问 `http://localhost:8080/` 即打开内置聊天页，流式对话，左侧会话栏支持新建/切换/删除/重命名，对话自动保存（存 `.myrouter/conversations.json`）；支持文件上传（图片走多模态、其他类型转 base64 附件）；聊天请求复用 GUI 配置的上游密钥
 - **昼夜陪伴**：主界面按本地时间自动切换白天/夜晚主题；状态区下方有一条"说话条"，整点与随机时段播报问候、使用统计（请求数 / 约 token 数），深夜 23:00-05:59 自动安静、只劝睡提醒；可一键静音
 - **系统托盘**：关窗最小化到托盘，服务后台继续运行；托盘菜单支持显示窗口 / 启动 / 停止 / 退出
 
@@ -51,9 +51,9 @@ dotnet publish myrouter.csproj -c Release -r win-x64 --self-contained true -p:Pu
 
 ### 配置
 
-首次启动后，在 GUI 中填写配置并点击"💾 保存配置"，写入 exe 同目录 `.myrouter/myrouter.config.json`（运行期数据统一放 `.myrouter/` 目录：配置、聊天记忆、陪伴统计；旧版散落在 exe 旁的文件会自动迁移进去）。
+首次启动后，在 GUI 中填写配置并点击"保存配置"，写入 exe 同目录 `.myrouter/myrouter.config.json`（运行期数据统一放 `.myrouter/` 目录：配置、用户画像、陪伴统计；旧版散落在 exe 旁的文件会自动迁移进去）。
 
-> ⚠️ `.myrouter/` 内含密钥与聊天片段，**不要提交到代码仓库**（已在 .gitignore 中排除）。
+> 注意：`.myrouter/` 内含密钥与用户画像，**不要提交到代码仓库**（已在 .gitignore 中排除）。
 
 ## 配置项
 
@@ -80,19 +80,20 @@ curl http://localhost:8080/v1/chat/completions \
 
 ### Web 聊天界面
 
-启动服务后，点击 GUI 中的"🌐 打开 Web"（或直接访问 `http://localhost:8080/`）：
+启动服务后，点击 GUI 中的"打开 Web"（或直接访问 `http://localhost:8080/`）：
 
-- 单会话流式对话（`/v1/chat/completions` 的 SSE 原样回传，打字机效果）
-- 内建轻量 Markdown 渲染（代码块/标题/列表/引用/粗斜体/链接/图片，内容先转义防注入）
-- 思维链折叠：`reasoning_content`/`reasoning` 单独渲染为"🧠 思考过程"折叠块（默认收起），正文照常流式输出
-- 📎 附件：图片自动转多模态，其他文件转 base64 附件随消息发送
-- 输入区上方直接选择模型：自动从上游拉取模型列表（可 ↻ 刷新），无需设置项，单会话刷新页面即清空
+- 多会话对话：左侧会话栏（"会话"按钮展开）新建 / 切换 / 删除 / 双击重命名；每轮对话结束自动保存到 `.myrouter/conversations.json`，刷新或重开页面不丢，上限 100 个（超出删最旧），首轮对话由 AI 自动总结标题
+- Markdown 渲染：markdown-it（开源解析器，本地嵌入、不走 CDN）完整支持表格/嵌套列表/围栏代码/引用/粗斜体/链接/图片；原始 HTML 一律转义为文本防注入，危险协议（javascript: 等）链接自动拦截；代码块由 highlight.js 子集高亮（js/ts/python/bash/json 等常用语言），链接新窗口打开；LaTeX 数学公式由 KaTeX 渲染（`$...$` 行内 / `$$...$$` 块级，公式错误显示原文，代码块内不误伤）
+- 思维链折叠：`reasoning_content`/`reasoning` 单独渲染为"思考过程"折叠块（默认收起），正文照常流式输出
+- 附件：图片自动转多模态，其他文件转 base64 附件随消息发送
+- JS 代码运行：通过 **function calling 工具调用**实现——请求声明 `run_javascript` 工具（浏览器沙箱执行，纯计算无网络/文件/DOM，15 秒超时终止，console.log 输出回显），AI 主动决定何时真正执行代码；执行结果以 `tool` 消息回填，AI 再基于真实输出给出结论（不会未跑先编结果）。非工具调用的 ```js 代码块只是普通展示（可手动点运行查看，不回传 AI）；"自动运行代码"开关（默认开）控制 `tool_choice: auto/none`
+- 输入区上方直接选择模型：自动从上游拉取模型列表（可刷新），选择跨会话记住
 - 上下文窗口自动管理：按所选模型 `context_length` 的 60% 做历史预算（拉不到默认 32k），超预算自动从最旧消息裁剪、至少保留最近一轮，不会撑爆模型上下文
-- 长期记忆（LLM 自动整理）：短用户消息（3-80 字）进待整理队列，攒够后**由上游 LLM 自动提炼**为长期记忆（合并语义重复、丢弃无信息量内容、改写为事实句），下次对话作为 system 上下文注入——AI 跨会话记得你；全程无需手动操作，数据存 `.myrouter/memory.json`（含对话片段，勿提交 git）
+- 用户画像（agent.md）：顶栏"画像"打开面板——可手写编辑 `.myrouter/agent.md`（身份/偏好/习惯），也可一键让 AI 根据本次对话提炼更新（合并现有画像与对话中的新稳定信息）；每次聊天作为 system 上下文注入，AI 跨会话记得你；不写文件则不注入
 - 密钥完全复用 GUI 配置的上游密钥，Web 端不接触任何 API Key
 - 页面 logo 与 favicon 直接由内嵌 `myrouter.ico` 转 PNG 输出（`/logo.png`），与应用图标完全一致
 
-> 注意：`/`、`/chat`、`/models`、`/logo.png` 四条路径由本地 Web 界面占用、跳过本地鉴权（本机使用）；其余路径（`/v1/*`）仍走鉴权代理。
+> 注意：`/`、`/chat`、`/models`、`/logo.png`、`/agent`、`/conversations`、`/md/vendor.js`、`/md/katex.css` 八条路径由本地 Web 界面占用、跳过本地鉴权（本机使用）；其余路径（`/v1/*`）仍走鉴权代理。
 
 ## 鉴权细节
 
@@ -121,15 +122,18 @@ myrouter/
 │   └── ThemeManager.cs         # 昼夜主题：18:00-06:00 深色 / 其余浅色，递归应用
 ├── Models/AppConfig.cs         # 配置模型与 JSON 读写
 ├── Services/
-│   ├── ProxyServer.cs          # Kestrel 代理核心：鉴权 + 转发 + 路径拼接 + Web 分流(/、/chat、/models、/logo.png)
+│   ├── ProxyServer.cs          # Kestrel 代理核心：鉴权 + 转发 + 路径拼接 + Web 分流(/、/chat、/models、/logo.png、/agent、/conversations、/md/vendor.js、/md/katex.css)
 │   ├── Companion.cs            # 昼夜陪伴：问候/提醒生成 + 统计快照（存 .myrouter/companion.json）
-│   └── MemoryStore.cs          # 聊天长期记忆：采集短消息 + 自行整理（去重合并/衰减/上限） + system 注入
+│   ├── ConversationStore.cs    # Web 对话历史：多会话增删改查（存 .myrouter/conversations.json）
+│   ├── JsonOpts.cs             # 共享 JSON 序列化选项（中文原样输出）
+│   └── AppPaths.cs             # 运行期数据目录 .myrouter/（配置、用户画像 agent.md、会话历史、陪伴统计）
 ├── content/index.html          # 内置 Web 聊天页面（单文件自包含，打进 exe）
-├── tools/                      # 图标生成 / 验证脚本
+├── tools/                      # 图标生成 / 验证脚本 / 前端依赖打包
 │   ├── make_icon.py            #   PIL 生成应用图标
 │   ├── _verify_pe.py           #   验证 exe 内嵌图标
 │   ├── _verify_embed.csx       #   验证 DLL 嵌入资源（ico / html 通用）
-│   └── _verify_frontend.mjs    #   node 验证 Web 前端核心逻辑（思维链提取/光标清理）
+│   ├── _verify_frontend.mjs    #   node 验证 Web 前端核心逻辑（思维链/画像/会话/JS 代码运行）
+│   └── vendor/                 #   第三方依赖（markdown-it + highlight.js 子集 + KaTeX）：build.mjs 打包，产物嵌入 exe
 └── tests/
     ├── myrouter.SmokeTest/     # mock 冒烟测试（不需网络）
     └── myrouter.OpenRouterTest # 真实集成测试（需上游 key）
@@ -141,7 +145,7 @@ myrouter/
 # 一次构建全部三个项目
 dotnet build myrouter.slnx -c Release
 
-# 冒烟测试（mock 上游，不需网络）：鉴权、透传、路径去重、gzip 透传、超时、Web 页面/聊天/模型列表/logo、长期记忆等 19 个场景
+# 冒烟测试（mock 上游，不需网络）：鉴权、透传、路径去重、gzip 透传、超时、Web 页面/聊天/模型列表/logo/vendor、用户画像、会话管理等 22 个场景
 dotnet run --project tests/myrouter.SmokeTest
 
 # 真实集成测试（需网络与上游 key）
@@ -154,6 +158,7 @@ dotnet run --project tests/myrouter.OpenRouterTest -- <upstream-key> [local-key]
 - WinForms（GUI、托盘、NotifyIcon）
 - ASP.NET Core Kestrel（HTTP 代理内核）
 - System.Net.Http（上游转发）
+- markdown-it + highlight.js + KaTeX（Web 端 Markdown 渲染、代码高亮与 LaTeX 公式，本地嵌入零 CDN，esbuild 打包）
 - PIL（图标生成，仅开发期 tools 使用）
 
 ## 许可证

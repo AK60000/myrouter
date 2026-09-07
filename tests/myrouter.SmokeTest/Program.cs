@@ -16,7 +16,8 @@ internal static class Program
     {
         const int upstreamPort = 18999;
         const int proxyPort = 18998;
-        var proxyMemoryPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-memory.json");
+        var proxyAgentPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-agent.md");
+        var proxyConvsPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-convs.json");
 
         using var upstream = new HttpListener();
         upstream.Prefixes.Add($"http://localhost:{upstreamPort}/");
@@ -64,22 +65,36 @@ internal static class Program
                     continue;
                 }
 
-                // /v1/chat/completions POST：LLM 记忆整理请求（body 带 x-memory-refine 标记）→ 返回整理结果
+                // /v1/chat/completions POST：AI 画像提炼请求（body 带 x-agent-refine 标记）→ 返回非流式画像
                 if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST" &&
-                    reqBody.Contains("x-memory-refine"))
+                    reqBody.Contains("x-agent-refine"))
                 {
-                    const string refineJson =
-                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"{\\\"memories\\\":[\\\"用户喜欢喝咖啡\\\",\\\"用户关注天气\\\"]}\"}}]}";
-                    var rBytes = System.Text.Encoding.UTF8.GetBytes(refineJson);
+                    const string agentJson =
+                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"我是 Bobby，喜欢喝咖啡。\\n我在学 Spring Boot。\"}}]}";
+                    var aBytes = System.Text.Encoding.UTF8.GetBytes(agentJson);
                     ctx.Response.ContentType = "application/json";
-                    ctx.Response.ContentLength64 = rBytes.Length;
-                    await ctx.Response.OutputStream.WriteAsync(rBytes);
+                    ctx.Response.ContentLength64 = aBytes.Length;
+                    await ctx.Response.OutputStream.WriteAsync(aBytes);
+                    ctx.Response.Close();
+                    continue;
+                }
+
+                // /v1/chat/completions POST：标题总结请求（body 带 x-title-refine 标记）→ 返回固定标题
+                if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST" &&
+                    reqBody.Contains("x-title-refine"))
+                {
+                    const string titleJson =
+                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"和小李的对话\"}}]}";
+                    var tBytes = System.Text.Encoding.UTF8.GetBytes(titleJson);
+                    ctx.Response.ContentType = "application/json";
+                    ctx.Response.ContentLength64 = tBytes.Length;
+                    await ctx.Response.OutputStream.WriteAsync(tBytes);
                     ctx.Response.Close();
                     continue;
                 }
 
                 // /v1/chat/completions POST：模拟上游 OpenAI 格式 SSE 流式响应
-                // （echo 带 headers + body，供 /chat 与长期记忆用例断言）
+                // （echo 带 headers + body，供 /chat 用例断言）
                 if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST")
                 {
                     var sse =
@@ -118,10 +133,9 @@ internal static class Program
             }
         });
 
-        // 先删残留文件再构造 ProxyServer——MemoryStore 构造时会 Load，
-        // 后删的话内存里还留着旧条目（Case 19 会基于残留继续合并）
-        File.Delete(proxyMemoryPath);
-        var proxy = new ProxyServer(memoryPath: proxyMemoryPath, memoryRefineThreshold: 2);
+        File.Delete(proxyAgentPath);   // 清残留，确保 Case 19 从干净状态开始
+        File.Delete(proxyConvsPath);
+        var proxy = new ProxyServer(agentProfilePath: proxyAgentPath, conversationsPath: proxyConvsPath);
         proxy.Log += Console.WriteLine;
 
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
@@ -357,6 +371,7 @@ internal static class Program
                     && body.Contains("\"stream\":true")                 // 后端自动补 stream=true
                     && body.Contains("reasoning_content")               // 字段思维链原样透传
                     && body.Contains("<thinking>")                      // 正文内嵌 thinking 标签原样透传
+                    && body.Contains("'messages':[{'role':'user','content':'hi'}]")  // 请求体原样透传（代码运行能力由前端 tools 声明，服务端不注入）
                     && body.Contains("Authorization=[Bearer sk-web-upstream-key]"); // 用配置的上游 key
                 if (!ok)
                     return $"status={r.StatusCode} ct={ct} body={body}";
@@ -412,8 +427,34 @@ internal static class Program
                     : $"status={r.StatusCode} ct={ct} len={bytes.Length} png={isPng}";
             });
 
-        // ── Case 19: 长期记忆——短消息采集、LLM 整理、system 注入 ──
-        await RunCase(proxy, http, "Long-term memory: collect, LLM-refine, inject",
+        // ── Case 18.5: /md/vendor.js + /md/katex.css 提供前端第三方依赖（markdown-it + highlight.js + KaTeX） ──
+        await RunCase(proxy, http, "/md/vendor.js + /md/katex.css serve frontend deps",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = true,
+                ApiKey = "local-key",
+            }, async h =>
+            {
+                var v = await h.GetAsync($"http://localhost:{proxyPort}/md/vendor.js");
+                var vBody = await v.Content.ReadAsStringAsync();
+                var vCt = v.Content.Headers.ContentType?.ToString() ?? "";
+                if (v.StatusCode != HttpStatusCode.OK || !vCt.Contains("javascript")
+                    || !vBody.Contains("MarkdownIt") || !vBody.Contains("hljs") || !vBody.Contains("katex"))
+                    return $"vendor failed: {v.StatusCode} ct={vCt} len={vBody.Length}";
+
+                var k = await h.GetAsync($"http://localhost:{proxyPort}/md/katex.css");
+                var kBody = await k.Content.ReadAsStringAsync();
+                var kCt = k.Content.Headers.ContentType?.ToString() ?? "";
+                return k.StatusCode == HttpStatusCode.OK && kCt.Contains("text/css")
+                       && kBody.Contains("@font-face") && kBody.Contains("data:font/woff2;base64")
+                    ? null
+                    : $"katex.css failed: {k.StatusCode} ct={kCt} len={kBody.Length}";
+            });
+
+        // ── Case 19: 用户画像——agent.md 内容作为 system 注入（手写维护的静态记忆） ──
+        await RunCase(proxy, http, "Agent profile: inject agent.md as system",
             new AppConfig
             {
                 UpstreamUrl = $"http://localhost:{upstreamPort}",
@@ -421,40 +462,128 @@ internal static class Program
                 RequireAuth = false,
             }, async h =>
             {
-                var post = (string body) => h.PostAsync($"http://localhost:{proxyPort}/chat",
+                File.WriteAllText(proxyAgentPath, "我是 Bobby，喜欢喝咖啡。");
+                try
+                {
+                    var r = await h.PostAsync($"http://localhost:{proxyPort}/chat",
+                        new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"介绍一下你自己\"}]}",
+                            System.Text.Encoding.UTF8, "application/json"));
+                    var b = await r.Content.ReadAsStringAsync();
+                    return r.StatusCode == HttpStatusCode.OK && b.Contains("我是 Bobby")
+                        ? null
+                        : $"agent.md not injected: {b[..Math.Min(300, b.Length)]}";
+                }
+                finally { File.Delete(proxyAgentPath); }
+            });
+
+        // ── Case 20: /agent 端点——GET 读、POST 保存、POST AI 生成写盘 ──
+        await RunCase(proxy, http, "/agent: read, save, AI-generate",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = false,
+            }, async h =>
+            {
+                var get = () => h.GetAsync($"http://localhost:{proxyPort}/agent");
+                var post = (string body) => h.PostAsync($"http://localhost:{proxyPort}/agent",
                     new StringContent(body, System.Text.Encoding.UTF8, "application/json"));
 
-                // 1) 两条短消息（阈值=2）→ 第二次请求触发后台 LLM 整理
-                var r1 = await post("{\"messages\":[{\"role\":\"user\",\"content\":\"我喜欢喝咖啡\"}]}");
-                if (r1.StatusCode != HttpStatusCode.OK) return $"first chat failed: {r1.StatusCode}";
-                await post("{\"messages\":[{\"role\":\"user\",\"content\":\"今天天气如何\"}]}");
+                // 1) GET 初始为空
+                var r0 = await get();
+                var b0 = await r0.Content.ReadAsStringAsync();
+                if (r0.StatusCode != HttpStatusCode.OK || !b0.Contains("\"content\":\"\""))
+                    return $"read empty failed: {r0.StatusCode} {b0[..Math.Min(120, b0.Length)]}";
 
-                // 2) 轮询等待异步整理完成（mock 返回整理后的记忆列表）
-                string json = "";
-                var deadline = DateTime.UtcNow.AddSeconds(3);
-                while (DateTime.UtcNow < deadline)
-                {
-                    if (File.Exists(proxyMemoryPath))
-                    {
-                        json = File.ReadAllText(proxyMemoryPath);
-                        if (json.Contains("用户喜欢喝咖啡") && json.Contains("用户关注天气")) break;
-                    }
-                    await Task.Delay(200);
-                }
-                if (!json.Contains("用户喜欢喝咖啡"))
-                    return $"LLM refine result missing: {json[..Math.Min(200, json.Length)]}";
-                using (var doc = JsonDocument.Parse(json))
-                {
-                    if (doc.RootElement.GetProperty("Pending").GetArrayLength() != 0)
-                        return $"pending not cleared after refine: {json[..Math.Min(160, json.Length)]}";
-                }
+                // 2) POST content 直接保存
+                var r1 = await post("{\"content\":\"手写画像：我住在深圳。\"}");
+                var b1 = await r1.Content.ReadAsStringAsync();
+                if (r1.StatusCode != HttpStatusCode.OK || !b1.Contains("我住在深圳"))
+                    return $"save failed: {r1.StatusCode} {b1[..Math.Min(160, b1.Length)]}";
 
-                // 3) 整理后的记忆注入下一次请求的 system
-                var r3 = await post("{\"messages\":[{\"role\":\"user\",\"content\":\"介绍一下你自己\"}]}");
+                // 3) GET 验证保存已落盘
+                var b2 = await (await get()).Content.ReadAsStringAsync();
+                if (!b2.Contains("我住在深圳"))
+                    return $"saved content not persisted: {b2[..Math.Min(160, b2.Length)]}";
+
+                // 4) POST messages → AI 提炼（mock 返回固定画像），返回并覆盖文件
+                var r3 = await post("{\"messages\":[{\"role\":\"user\",\"content\":\"我最近在学 Spring Boot\"}]}");
                 var b3 = await r3.Content.ReadAsStringAsync();
-                return b3.Contains("长期记忆") && b3.Contains("用户喜欢喝咖啡")
-                    ? null
-                    : $"memory not injected after refine: {b3[..Math.Min(300, b3.Length)]}";
+                if (r3.StatusCode != HttpStatusCode.OK || !b3.Contains("喜欢喝咖啡") || !b3.Contains("Spring Boot"))
+                    return $"AI generate failed: {r3.StatusCode} {b3[..Math.Min(200, b3.Length)]}";
+                var disk = File.ReadAllText(proxyAgentPath);
+                if (!disk.Contains("喜欢喝咖啡"))
+                    return $"generated profile not persisted: {disk[..Math.Min(160, disk.Length)]}";
+
+                File.Delete(proxyAgentPath);   // 清理，不影响后续用例
+                return null;
+            });
+
+        // ── Case 21: /conversations 会话——建/存(自动标题)/列表/读/删 ──
+        await RunCase(proxy, http, "/conversations: create, save, list, get, delete",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = false,
+            }, async h =>
+            {
+                var list = () => h.GetAsync($"http://localhost:{proxyPort}/conversations");
+
+                // 1) 初始列表为空
+                var b0 = await (await list()).Content.ReadAsStringAsync();
+                if (!b0.Contains("\"items\":[]"))
+                    return $"initial list not empty: {b0[..Math.Min(120, b0.Length)]}";
+
+                // 2) 新建会话
+                var r1 = await h.PostAsync($"http://localhost:{proxyPort}/conversations", null);
+                var b1 = await r1.Content.ReadAsStringAsync();
+                string cid;
+                using (var d = JsonDocument.Parse(b1))
+                    cid = d.RootElement.GetProperty("id").GetString() ?? "";
+                if (r1.StatusCode != HttpStatusCode.OK || cid.Length == 0)
+                    return $"create failed: {r1.StatusCode} {b1[..Math.Min(120, b1.Length)]}";
+
+                // 3) 保存消息（不带标题 → 自动取首条用户消息前 24 字）
+                var r2 = await h.PostAsync($"http://localhost:{proxyPort}/conversations/{cid}",
+                    new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"你好，我叫小李\"},{\"role\":\"assistant\",\"content\":\"你好！\"}]}",
+                        System.Text.Encoding.UTF8, "application/json"));
+                var b2 = await r2.Content.ReadAsStringAsync();
+                if (r2.StatusCode != HttpStatusCode.OK || !b2.Contains("你好，我叫小李"))
+                    return $"save failed: {r2.StatusCode} {b2[..Math.Min(160, b2.Length)]}";
+
+                // 4) 列表含自动标题元数据（Web 响应字段为 camelCase：title/id）
+                var b3 = await (await list()).Content.ReadAsStringAsync();
+                if (!b3.Contains("\"title\":\"你好，我叫小李\"") || !b3.Contains("\"id\":\"" + cid))
+                    return $"list missing camelCase fields: {b3[..Math.Min(200, b3.Length)]}";
+
+                // 4.5) LLM 总结标题覆盖自动截取（mock 返回固定标题）
+                var r4 = await h.PostAsync($"http://localhost:{proxyPort}/conversations/{cid}/title",
+                    new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"你好，我叫小李\"}]}",
+                        System.Text.Encoding.UTF8, "application/json"));
+                var b4b = await r4.Content.ReadAsStringAsync();
+                if (r4.StatusCode != HttpStatusCode.OK || !b4b.Contains("和小李的对话"))
+                    return $"title summarize failed: {r4.StatusCode} {b4b[..Math.Min(160, b4b.Length)]}";
+
+                // 5) 读详情能拿回消息
+                var b4 = await (await h.GetAsync($"http://localhost:{proxyPort}/conversations/{cid}"))
+                    .Content.ReadAsStringAsync();
+                if (!b4.Contains("\"role\":\"assistant\"") || !b4.Contains("你好！"))
+                    return $"get detail failed: {b4[..Math.Min(200, b4.Length)]}";
+
+                // 6) 删除后再查 404
+                var r5 = await h.DeleteAsync($"http://localhost:{proxyPort}/conversations/{cid}");
+                var b5 = await (await h.GetAsync($"http://localhost:{proxyPort}/conversations/{cid}"))
+                    .Content.ReadAsStringAsync();
+                if (r5.StatusCode != HttpStatusCode.OK || !b5.Contains("会话不存在"))
+                    return $"delete failed: {r5.StatusCode} {b5[..Math.Min(120, b5.Length)]}";
+
+                // 7) 列表为空
+                var b6 = await (await list()).Content.ReadAsStringAsync();
+                if (!b6.Contains("\"items\":[]"))
+                    return $"list not empty after delete: {b6[..Math.Min(160, b6.Length)]}";
+
+                return null;
             });
 
         // ── Case 8: 前缀去重 ─ upstream=/v1, client=/v1/chat/completions → /v1/chat/completions ──

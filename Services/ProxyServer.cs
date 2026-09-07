@@ -42,13 +42,13 @@ public class ProxyServer : IDisposable
     private readonly ProxyStats _stats = new();
     public ProxyStats Stats => _stats;
 
-    private readonly MemoryStore _memory;
-    private string? _lastModel;   // 最近一次 /chat 用的模型，LLM 记忆整理复用
+    private readonly string _agentProfilePath;
+    private readonly ConversationStore _conversations;
 
-    public ProxyServer(string? memoryPath = null, int memoryRefineThreshold = 8)
+    public ProxyServer(string? agentProfilePath = null, string? conversationsPath = null)
     {
-        _memory = new MemoryStore(memoryPath, memoryRefineThreshold);
-        _memory.Refiner = RefineMemoriesAsync;
+        _agentProfilePath = agentProfilePath ?? AppPaths.AgentFile;
+        _conversations = new ConversationStore(conversationsPath);
     }
 
     // 透明代理：必须原样透传上游响应（含 Content-Encoding/Content-Length），
@@ -256,18 +256,15 @@ public class ProxyServer : IDisposable
 
     // ── Web 界面（同端口根路径，本机 UI 使用，跳过本地鉴权） ──
 
-    private static readonly JsonSerializerOptions ChatJsonOptions = new()
-    {
-        // 转发请求体中文原样输出（默认会转义成 \uXXXX，徒增体积且难调试）
-        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-    };
-
     private static bool IsWebRequest(HttpContext ctx)
     {
         var p = ctx.Request.Path;
-        return HttpMethods.IsGet(ctx.Request.Method)
-            ? p.Equals("/") || p.Equals("/models") || p.Equals("/logo.png")
-            : HttpMethods.IsPost(ctx.Request.Method) && p.Equals("/chat");
+        if (HttpMethods.IsGet(ctx.Request.Method))
+            return p.Equals("/") || p.Equals("/models") || p.Equals("/logo.png") || p.Equals("/agent")
+                || p.Equals("/md/vendor.js") || p.Equals("/md/katex.css") || p.StartsWithSegments("/conversations");
+        if (HttpMethods.IsPost(ctx.Request.Method))
+            return p.Equals("/chat") || p.Equals("/agent") || p.StartsWithSegments("/conversations");
+        return HttpMethods.IsDelete(ctx.Request.Method) && p.StartsWithSegments("/conversations");
     }
 
     private async Task HandleWebAsync(HttpContext ctx)
@@ -287,12 +284,29 @@ public class ProxyServer : IDisposable
             await HandleLogoAsync(ctx);
             return;
         }
+        if (ctx.Request.Path.Equals("/md/vendor.js"))
+        {
+            await HandleStaticAsync(ctx, ".vendor.js", "text/javascript; charset=utf-8");
+            return;
+        }
+        if (ctx.Request.Path.Equals("/md/katex.css"))
+        {
+            await HandleStaticAsync(ctx, ".katex.css", "text/css; charset=utf-8");
+            return;
+        }
+        if (ctx.Request.Path.Equals("/agent"))
+        {
+            await HandleAgentAsync(ctx);
+            return;
+        }
+        if (ctx.Request.Path.StartsWithSegments("/conversations"))
+        {
+            await HandleConversationsAsync(ctx);
+            return;
+        }
 
         ctx.Response.ContentType = "text/html; charset=utf-8";
-        var html = LoadEmbeddedResource("index.html") is { Length: > 0 } bytes
-            ? Encoding.UTF8.GetString(bytes)
-            : "<h1>myrouter</h1><p>Web 页面缺失</p>";
-        await ctx.Response.WriteAsync(html, ctx.RequestAborted);
+        await ctx.Response.WriteAsync(IndexHtml.Value ?? "<h1>myrouter</h1><p>Web 页面缺失</p>", ctx.RequestAborted);
     }
 
     /// <summary>
@@ -339,24 +353,259 @@ public class ProxyServer : IDisposable
     /// <summary>把内嵌 myrouter.ico 转 PNG 输出，保证页面 logo 与应用图标完全一致。</summary>
     private async Task HandleLogoAsync(HttpContext ctx)
     {
-        var ico = LoadEmbeddedResource("myrouter.ico");
-        if (ico is null)
+        var png = LogoPng.Value;
+        if (png is null)
         {
             ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
             return;
         }
-        byte[] png;
-        using (var ms = new MemoryStream(ico))
-        using (var icon = new Icon(ms))
-        using (var bmp = icon.ToBitmap())
-        using (var outMs = new MemoryStream())
+        await SendStaticAsync(ctx, png, "image/png");
+    }
+
+    /// <summary>提供前端静态资源（第三方依赖脚本 / KaTeX 样式，字体内嵌），网页端零 CDN。</summary>
+    private async Task HandleStaticAsync(HttpContext ctx, string suffix, string contentType)
+    {
+        var bytes = LoadEmbeddedResource(suffix);
+        if (bytes is null)
         {
-            bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
-            png = outMs.ToArray();
+            ctx.Response.StatusCode = (int)HttpStatusCode.NotFound;
+            return;
         }
-        ctx.Response.ContentType = "image/png";
+        await SendStaticAsync(ctx, bytes, contentType);
+    }
+
+    /// <summary>发出带缓存头的静态资源响应（logo 转换结果与嵌入资源共用收尾）。</summary>
+    private static async Task SendStaticAsync(HttpContext ctx, byte[] bytes, string contentType)
+    {
+        ctx.Response.ContentType = contentType;
         ctx.Response.Headers["Cache-Control"] = "public, max-age=86400";
-        await ctx.Response.Body.WriteAsync(png, ctx.RequestAborted);
+        await ctx.Response.Body.WriteAsync(bytes, ctx.RequestAborted);
+    }
+
+    /// <summary>
+    /// 用户画像端点：GET 读 agent.md；POST 两种动作——
+    /// body 带 content 直接保存；带 messages 让上游 LLM 合并现有画像+对话生成新版后写盘。
+    /// </summary>
+    private async Task HandleAgentAsync(HttpContext ctx)
+    {
+        if (HttpMethods.IsGet(ctx.Request.Method))
+        {
+            await WriteJson(ctx, new { content = ReadAgentProfile() });
+            return;
+        }
+
+        var payload = await ReadBodyJsonAsync(ctx);
+        if (payload is null)
+        {
+            await WriteChatError(ctx, 400, "请求体不是合法 JSON");
+            return;
+        }
+
+        string? content;
+        if (payload["messages"] is JsonArray msgs && msgs.Count > 0)
+            content = await GenerateAgentProfileAsync(msgs);
+        else if (payload["content"] is JsonValue cv && cv.TryGetValue<string>(out var s))
+            content = s;
+        else
+        {
+            await WriteChatError(ctx, 400, "需要 content（保存）或 messages（AI 生成）");
+            return;
+        }
+
+        if (content is null)
+        {
+            await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, "AI 画像生成失败（请检查上游配置与 key）");
+            return;
+        }
+
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_agentProfilePath)!);
+            File.WriteAllText(_agentProfilePath, content);
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"[agent-err] {ex.Message}");
+            await WriteChatError(ctx, 500, "画像写入失败");
+            return;
+        }
+
+        await WriteJson(ctx, new { content });
+    }
+
+    /// <summary>
+    /// 会话端点：GET /conversations 列表 / GET /conversations/{id} 详情；
+    /// POST /conversations 新建，POST /conversations/{id} 保存（title/messages 可选），
+    /// POST /conversations/{id}/title 让 LLM 总结标题；DELETE /conversations/{id} 删除。
+    /// 数据走 ConversationStore（.myrouter/conversations.json）。
+    /// </summary>
+    private async Task HandleConversationsAsync(HttpContext ctx)
+    {
+        var path = ctx.Request.Path.Value ?? "";
+        var id = path.StartsWith("/conversations") ? path["/conversations".Length..].Trim('/') : "";
+        var isTitle = id.EndsWith("/title");
+        if (isTitle) id = id[..^"/title".Length].Trim('/');
+
+        if (HttpMethods.IsGet(ctx.Request.Method))
+        {
+            if (id.Length == 0)
+            {
+                await WriteJson(ctx, new { items = _conversations.List() });
+                return;
+            }
+            var conv = _conversations.Get(id);
+            if (conv is null)
+            {
+                await WriteChatError(ctx, 404, "会话不存在");
+                return;
+            }
+            await WriteJson(ctx, new { id = conv.Id, title = conv.Title, messages = conv.Messages });
+            return;
+        }
+
+        if (HttpMethods.IsDelete(ctx.Request.Method))
+        {
+            if (id.Length == 0 || !_conversations.Delete(id))
+            {
+                await WriteChatError(ctx, 404, "会话不存在");
+                return;
+            }
+            await WriteJson(ctx, new { ok = true });
+            return;
+        }
+
+        if (HttpMethods.IsPost(ctx.Request.Method))
+        {
+            var payload = await ReadBodyJsonAsync(ctx);
+            if (id.Length == 0)
+            {
+                if (payload is not null)
+                {
+                    await WriteChatError(ctx, 400, "新建会话不需要请求体");
+                    return;
+                }
+                await WriteJson(ctx, new { id = _conversations.Create().Id });
+                return;
+            }
+            if (isTitle)
+            {
+                await SummarizeTitleAsync(ctx, id, payload);
+                return;
+            }
+            if (payload is null)
+            {
+                await WriteChatError(ctx, 400, "请求体不是合法 JSON");
+                return;
+            }
+            List<JsonObject>? messages = null;
+            if (payload["messages"] is JsonArray msgs)
+                messages = msgs.Select(m => (m as JsonObject) ?? new JsonObject()).ToList();
+            string? title = payload["title"] is JsonValue tv && tv.TryGetValue<string>(out var ts) ? ts : null;
+            if (!_conversations.Save(id, title, messages))
+            {
+                await WriteChatError(ctx, 404, "会话不存在");
+                return;
+            }
+            await WriteJson(ctx, new { ok = true, id, title = _conversations.Get(id)?.Title ?? "" });
+            return;
+        }
+
+        await WriteChatError(ctx, 405, "不支持的请求方法");
+    }
+
+    /// <summary>让 LLM 根据对话总结标题并保存，覆盖自动截取的临时标题。</summary>
+    private async Task SummarizeTitleAsync(HttpContext ctx, string id, JsonObject? payload)
+    {
+        if (payload?["messages"] is not JsonArray msgs || msgs.Count == 0)
+        {
+            await WriteChatError(ctx, 400, "需要 messages（标题总结）");
+            return;
+        }
+        var title = await AskUpstreamAsync(
+            "为这段对话生成标题，不超过 20 字，不加标点与引号，直接输出标题。",
+            MessagesToText(msgs), "x-title-refine");
+        if (title is null)
+        {
+            await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, "标题生成失败（请检查上游配置与 key）");
+            return;
+        }
+        title = title.Trim().Trim('"', '\'', '「', '」', '《', '》', '“', '”', '，', '。');
+        if (!_conversations.Save(id, title, null))
+        {
+            await WriteChatError(ctx, 404, "会话不存在");
+            return;
+        }
+        await WriteJson(ctx, new { ok = true, title });
+    }
+
+    private static async Task WriteJson(HttpContext ctx, object obj)
+    {
+        ctx.Response.ContentType = "application/json; charset=utf-8";
+        await ctx.Response.WriteAsync(JsonSerializer.Serialize(obj, JsonOpts.Web), ctx.RequestAborted);
+    }
+
+    /// <summary>让上游 LLM 合并现有画像与最新对话，输出新版 agent.md；失败返回 null。</summary>
+    private async Task<string?> GenerateAgentProfileAsync(JsonArray messages)
+    {
+        const string sys = "你是用户画像维护器。合并现有画像与最新对话，输出新版 agent.md。\n" +
+                           "只保留稳定事实（身份/偏好/习惯/环境）；丢弃寒暄与一次性指令；\n" +
+                           "语义重复合并为一条陈述句；简练 markdown，≤30 行。仅输出画像内容，不要解释。";
+        var existing = ReadAgentProfile();
+        var user = "现有画像：\n" + (string.IsNullOrWhiteSpace(existing) ? "（无）" : existing) +
+                   "\n\n最新对话：\n" + MessagesToText(messages);
+        return await AskUpstreamAsync(sys, user, "x-agent-refine");
+    }
+
+    /// <summary>调用上游非流式补全，返回 assistant 正文；失败返回 null。</summary>
+    private async Task<string?> AskUpstreamAsync(string system, string user, string marker)
+    {
+        var payload = new JsonObject
+        {
+            ["stream"] = false,
+            [marker] = true,   // 标记专用请求（上游一般忽略未知字段；mock 据此识别）
+            ["messages"] = new JsonArray(
+                new JsonObject { ["role"] = "system", ["content"] = system },
+                new JsonObject { ["role"] = "user", ["content"] = user }),
+        };
+        using var req = BuildUpstreamChatRequest(payload.ToJsonString(JsonOpts.Unsafe));
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(CancellationToken.None);
+        cts.CancelAfter(_upstreamTimeout);   // 跟随 GUI 配置的上游超时（慢模型下固定 30s 会误杀）
+        try
+        {
+            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token);
+            if (!resp.IsSuccessStatusCode) return null;
+            var body = await resp.Content.ReadAsStringAsync(cts.Token);
+            using var doc = JsonDocument.Parse(body);
+            var text = doc.RootElement.GetProperty("choices")[0]
+                .GetProperty("message").GetProperty("content").GetString();
+            return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
+        }
+        catch { return null; }   // 失败由调用方决定如何处理
+    }
+
+    private static string MessagesToText(JsonArray messages) =>
+        string.Join("\n", messages.Select(m =>
+        {
+            var role = m?["role"]?.GetValue<string>() ?? "?";
+            return $"[{role}] {ConversationStore.ContentToText(m?["content"])}";
+        }));
+
+    private static async Task<JsonObject?> ReadBodyJsonAsync(HttpContext ctx)
+    {
+        string bodyText;
+        using (var reader = new StreamReader(ctx.Request.Body, Encoding.UTF8))
+            bodyText = await reader.ReadToEndAsync(ctx.RequestAborted);
+        try { return JsonNode.Parse(bodyText) as JsonObject; }
+        catch (JsonException) { return null; }
+    }
+
+    private string ReadAgentProfile()
+    {
+        try
+        {
+            return File.Exists(_agentProfilePath) ? File.ReadAllText(_agentProfilePath) : "";
+        }
+        catch { return ""; }
     }
 
     /// <summary>
@@ -366,23 +615,10 @@ public class ProxyServer : IDisposable
     /// </summary>
     private async Task HandleChatAsync(HttpContext ctx)
     {
-        string bodyText;
-        using (var reader = new StreamReader(ctx.Request.Body, Encoding.UTF8))
-            bodyText = await reader.ReadToEndAsync(ctx.RequestAborted);
-
-        JsonObject payload;
-        try
+        var payload = await ReadBodyJsonAsync(ctx);
+        if (payload is null || !payload.ContainsKey("messages"))
         {
-            payload = (JsonNode.Parse(bodyText) as JsonObject)!;
-            if (payload is null || !payload.ContainsKey("messages"))
-            {
-                await WriteChatError(ctx, 400, "请求体需要 messages 字段");
-                return;
-            }
-        }
-        catch (JsonException)
-        {
-            await WriteChatError(ctx, 400, "请求体不是合法 JSON");
+            await WriteChatError(ctx, 400, payload is null ? "请求体不是合法 JSON" : "请求体需要 messages 字段");
             return;
         }
 
@@ -390,10 +626,11 @@ public class ProxyServer : IDisposable
         payload.Remove("apiKey");
         payload["stream"] = true;
 
-        // 长期记忆：采集短用户消息 → 自行整理 → 注入活跃记忆为 system 上下文
-        CollectAndInjectMemory(payload, DateTime.Now);
+        // 用户画像：agent.md 存在则作为 system 消息注入（手写维护，AI 借此跨会话记得用户）
+        InjectAgentProfile(payload);
+        // 代码运行能力由前端 tools 声明（run_javascript）承担，此处无需额外注入
 
-        var json = payload.ToJsonString(ChatJsonOptions);
+        var json = payload.ToJsonString(JsonOpts.Unsafe);
         TrackStart(json.Length);
         using var req = BuildUpstreamChatRequest(json);
 
@@ -434,12 +671,9 @@ public class ProxyServer : IDisposable
 
     private static async Task WriteChatError(HttpContext ctx, int status, string message)
     {
-        if (!ctx.Response.HasStarted)
-        {
-            ctx.Response.StatusCode = status;
-            ctx.Response.ContentType = "application/json";
-            await ctx.Response.WriteAsync(JsonSerializer.Serialize(new { error = message }, ChatJsonOptions), ctx.RequestAborted);
-        }
+        if (ctx.Response.HasStarted) return;
+        ctx.Response.StatusCode = status;
+        await WriteJson(ctx, new { error = message });   // error 属性本就小写，camelCase 策略不影响
     }
 
     /// <summary>构造转发上游 /v1/chat/completions 的 POST 请求（统一 key；json 为已序列化的请求体）。</summary>
@@ -454,100 +688,21 @@ public class ProxyServer : IDisposable
         return req;
     }
 
-    /// <summary>
-    /// 长期记忆三步：记录最近模型 → 采集最后一条短用户消息（3-80 字符）→ 注入活跃记忆
-    /// 为 system 上下文（跨会话记忆，AI 据此记得用户信息）。
-    /// </summary>
-    private void CollectAndInjectMemory(JsonObject payload, DateTime now)
+    /// <summary>注入用户画像：agent.md 存在则插入到现有 system 消息之后（用户提示词优先，画像补充其后）。</summary>
+    private void InjectAgentProfile(JsonObject payload)
     {
-        // 记录最近使用的模型：LLM 记忆整理复用它
-        if (payload.TryGetPropertyValue("model", out var mv) && mv is JsonValue mvv &&
-            mvv.TryGetValue<string>(out var mstr) && !string.IsNullOrWhiteSpace(mstr))
-            _lastModel = mstr;
-
         if (payload["messages"] is not JsonArray arr || arr.Count == 0) return;
+        var profile = ReadAgentProfile().Trim();
+        if (profile.Length == 0) return;
 
-        for (var i = arr.Count - 1; i >= 0; i--)
-        {
-            var msg = arr[i];
-            if (msg?["role"]?.GetValue<string>() != "user") continue;
-            if (msg["content"] is JsonValue v && v.TryGetValue<string>(out var s) &&
-                s.Length is >= 3 and <= 80)
-                _memory.Add(s, _lastModel);
-            break; // 只取最后一条用户消息
-        }
-
-        var mems = _memory.Top();
-        if (mems.Count == 0) return;
-        // 注入位置：紧跟用户自己的 system 提示词之后（用户提示词优先，记忆补充其后）
         var insertAt = 0;
         while (insertAt < arr.Count && arr[insertAt]?["role"]?.GetValue<string>() == "system")
             insertAt++;
         arr.Insert(insertAt, new JsonObject
         {
             ["role"] = "system",
-            ["content"] = "用户长期记忆（自动整理）：\n- " + string.Join("\n- ", mems),
+            ["content"] = profile,
         });
-    }
-
-    /// <summary>
-    /// LLM 记忆整理器：把现有记忆 + 待整理片段发给上游，要求输出整理后的记忆 JSON。
-    /// 非流式、短超时；失败返回 null（调用方静默保留原记忆）。
-    /// </summary>
-    private async Task<List<string>?> RefineMemoriesAsync(
-        List<string> existing, List<string> pending, string? model, CancellationToken ct)
-    {
-        const string sys = "你是用户长期记忆整理器。合并现有记忆与新对话片段，输出精简后的记忆列表。\n" +
-                           "只保留稳定事实（偏好/身份/习惯/环境）；丢弃寒暄、一次性指令、无信息量内容；\n" +
-                           "语义重复的合并为一条；改写为简洁陈述句，每条≤80字；总数≤50条。\n" +
-                           "仅输出 JSON：{\"memories\":[\"...\", ...]}，不要任何其他文字。";
-        var user = "现有记忆：\n" +
-                   (existing.Count == 0 ? "（无）" : string.Join("\n", existing.Select(m => "- " + m))) +
-                   "\n\n新对话片段：\n" +
-                   string.Join("\n", pending.Select(m => "- " + m));
-
-        var payload = new JsonObject
-        {
-            ["stream"] = false,
-            ["x-memory-refine"] = true,   // 标记整理请求（上游一般忽略未知字段；mock 据此识别）
-            ["messages"] = new JsonArray(
-                new JsonObject { ["role"] = "system", ["content"] = sys },
-                new JsonObject { ["role"] = "user", ["content"] = user }),
-        };
-        if (!string.IsNullOrWhiteSpace(model)) payload["model"] = model;
-
-        using var req = BuildUpstreamChatRequest(payload.ToJsonString(ChatJsonOptions));
-
-        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(30));
-        try
-        {
-            using var resp = await _http.SendAsync(req, HttpCompletionOption.ResponseContentRead, cts.Token);
-            if (!resp.IsSuccessStatusCode) return null;
-            var body = await resp.Content.ReadAsStringAsync(cts.Token);
-            using var doc = JsonDocument.Parse(body);
-            var content = doc.RootElement
-                .GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
-            if (string.IsNullOrWhiteSpace(content)) return null;
-            var start = content.IndexOf('{');
-            var end = content.LastIndexOf('}');
-            if (start < 0 || end <= start) return null;
-            var parsed = JsonNode.Parse(content[start..(end + 1)]) as JsonObject;
-            var memories = parsed?["memories"] as JsonArray;
-            if (memories is null) return null;
-            var list = memories
-                .Where(n => n is not null)
-                .Select(n => n!.GetValue<string>())
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .Select(s => s.Trim())
-                .Where(s => s.Length <= 80)
-                .ToList();
-            return list.Count > 0 ? list : null;
-        }
-        catch
-        {
-            return null;   // 整理失败由调用方静默处理
-        }
     }
 
     private static async Task WriteChatStreamError(HttpContext ctx, string message)
@@ -558,22 +713,41 @@ public class ProxyServer : IDisposable
             return;
         }
         // SSE 中追加 [DONE] 前先发 error 事件，前端据此中断渲染并展示
-        await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(new { error = message }, ChatJsonOptions)}\n\n", ctx.RequestAborted);
+        await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(new { error = message }, JsonOpts.Unsafe)}\n\n", ctx.RequestAborted);
     }
 
-    /// <summary>从程序集嵌入资源按文件名后缀读取，返回原始字节（ico/html 等）。</summary>
-    private static byte[]? LoadEmbeddedResource(string suffix)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]?> EmbeddedCache = new();
+
+    /// <summary>从程序集嵌入资源按文件名后缀读取（进程内缓存：静态资源每次请求都重新枚举/拷贝是浪费）。</summary>
+    private static byte[]? LoadEmbeddedResource(string suffix) => EmbeddedCache.GetOrAdd(suffix, s =>
     {
         var asm = typeof(ProxyServer).Assembly;
         var name = asm.GetManifestResourceNames()
-            .FirstOrDefault(n => n.EndsWith(suffix, StringComparison.OrdinalIgnoreCase));
+            .FirstOrDefault(n => n.EndsWith(s, StringComparison.OrdinalIgnoreCase));
         if (name is null) return null;
         using var stream = asm.GetManifestResourceStream(name);
         if (stream is null) return null;
         using var ms = new MemoryStream();
         stream.CopyTo(ms);
         return ms.ToArray();
-    }
+    });
+
+    /// <summary>首页 HTML（解码后缓存，不再每次请求重复 GetString）。</summary>
+    private static readonly Lazy<string?> IndexHtml = new(() =>
+        LoadEmbeddedResource("index.html") is { Length: > 0 } bytes ? Encoding.UTF8.GetString(bytes) : null);
+
+    /// <summary>应用图标 → PNG（转换结果缓存，避免每次请求走 GDI+ 位图转换）。</summary>
+    private static readonly Lazy<byte[]?> LogoPng = new(() =>
+    {
+        var ico = LoadEmbeddedResource("myrouter.ico");
+        if (ico is null) return null;
+        using var ms = new MemoryStream(ico);
+        using var icon = new Icon(ms);
+        using var bmp = icon.ToBitmap();
+        using var outMs = new MemoryStream();
+        bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);
+        return outMs.ToArray();
+    });
 
     private async Task ForwardAsync(HttpContext ctx, CancellationToken token)
     {

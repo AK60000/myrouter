@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>myrouter</title>
 <link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="/md/katex.css">
 <style>
   :root {
     --bg: #0f1115;
@@ -176,6 +177,8 @@
   .composerRow { display: flex; align-items: center; gap: 8px; }
   .composerRow .spacer { flex: 1; }
   .hint { font-size: 12px; color: var(--text-dim); }
+  .hint.toggle { display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none; }
+  .hint.toggle input { accent-color: var(--accent); margin: 0; }
   .files { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 0 8px; }
   .fileChip {
     display: flex; align-items: center; gap: 8px;
@@ -187,39 +190,177 @@
   .fileChip .thumb { width: 26px; height: 26px; border-radius: 6px; object-fit: cover; }
   .fileChip .rm { cursor: pointer; color: var(--text-dim); padding: 0 4px; }
   .fileChip .rm:hover { color: var(--danger); }
+
+  /* ── 用户画像面板 ── */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50;
+    background: rgba(0, 0, 0, .55);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .overlay[hidden] { display: none; }
+  .panel {
+    width: min(640px, 100%);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 20px 22px;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, .4);
+  }
+  .panel h2 { margin: 0 0 6px; font-size: 16px; }
+  .panel .desc { margin: 0 0 14px; font-size: 13px; color: var(--text-dim); line-height: 1.7; }
+  .panel .desc code {
+    background: rgba(255, 255, 255, .09); padding: 1px 5px; border-radius: 4px; font-size: 12px;
+  }
+  .panel textarea {
+    width: 100%; min-height: 180px; max-height: 45vh;
+    background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 10px;
+    color: var(--text); font: inherit; font-size: 13.5px; line-height: 1.6;
+    padding: 10px 12px; resize: vertical; outline: none;
+  }
+  .panel textarea:focus { border-color: rgba(0, 167, 230, .55); }
+  .panel .row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+  .panel .row .spacer { flex: 1; }
+  .panel .note { font-size: 12.5px; color: var(--text-dim); margin-top: 10px; line-height: 1.7; }
+  .panel .note.ok { color: #4ade80; }
+  .panel .note.err { color: var(--danger); }
+
+  /* ── JS 代码块运行 ── */
+  .codeWrap { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; margin: 8px 0; }
+  .codeWrap pre { border: none; border-radius: 0; margin: 0; }
+  .codeWrap .runCode {
+    width: 100%; border: none; border-top: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text);
+    padding: 6px; font-size: 12.5px; cursor: pointer;
+  }
+  .codeWrap .runCode:hover:not(:disabled) { background: #232a36; }
+  .codeWrap .runCode:disabled { opacity: .5; cursor: wait; }
+  .codeOut {
+    padding: 8px 12px; font-family: Consolas, monospace; font-size: 12.5px;
+    border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-all;
+    color: var(--text-dim); line-height: 1.6;
+  }
+  .codeOut.ok { color: var(--text); }
+  .codeOut.err { color: var(--danger); }
+
+  /* ── 代码运行输出（自动注入的中间消息）：提示样式而非用户气泡 ── */
+  .msg.sys { justify-content: center; }
+  .msg.sys .avatar { display: none; }
+  .msg.sys .bubble {
+    background: none; border: 1px dashed var(--border);
+    max-width: 90%; font-size: 12.5px; color: var(--text-dim);
+    white-space: pre-wrap; padding: 8px 12px;
+  }
+
+  /* ── 工具调用步骤（run_javascript）：AI 主动调用的代码执行块 ── */
+  .toolCall {
+    border: 1px dashed rgba(255, 255, 255, .2);
+    border-radius: 8px;
+    margin: 8px 0;
+    overflow: hidden;
+  }
+  .toolCall .toolTitle {
+    font-size: 11px; color: var(--text-dim);
+    padding: 4px 10px;
+    border-bottom: 1px solid var(--border);
+    background: rgba(255, 255, 255, .03);
+  }
+  .toolCall pre {
+    border: none; border-radius: 0; margin: 0;
+    border-bottom: 1px solid var(--border);
+    max-height: 260px;
+  }
+  .toolCall .codeOut { border-top: none; }
+
+  /* ── highlight.js github-dark 配色（本地内嵌，仅作用于代码高亮 span） ── */
+  .hljs-comment, .hljs-quote { color: #8b949e; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-subst { color: #ff7b72; }
+  .hljs-number, .hljs-literal, .hljs-variable, .hljs-template-variable, .hljs-tag .hljs-attr { color: #79c0ff; }
+  .hljs-string, .hljs-doctag { color: #a5d6ff; }
+  .hljs-title, .hljs-section, .hljs-selector-id { color: #d2a8ff; }
+  .hljs-type, .hljs-class .hljs-title, .hljs-attr { color: #ffa657; }
+  .hljs-built_in, .hljs-symbol, .hljs-bullet, .hljs-code, .hljs-addition { color: #7ee787; }
+  .hljs-meta, .hljs-deletion { color: #ffa198; }
+  .hljs-emphasis { font-style: italic; }
+  .hljs-strong { font-weight: 600; }
+
+  /* ── 会话侧栏 ── */
+  .btn.icon { padding: 7px 10px; }
+  .mid { display: flex; flex: 1; min-height: 0; }
+  .sidebar {
+    width: 260px; flex: none;
+    border-right: 1px solid var(--border);
+    background: rgba(13, 16, 21, .55);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+    transition: margin-left .2s ease;
+  }
+  .sidebar.collapsed { margin-left: -260px; }
+  .sideHead { padding: 12px; border-bottom: 1px solid var(--border); }
+  .sideHead .btn { width: 100%; }
+  .convList { flex: 1; overflow-y: auto; padding: 6px; }
+  .convItem {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px; border-radius: 8px; cursor: pointer;
+    font-size: 13px; color: var(--text-dim);
+  }
+  .convItem:hover { background: rgba(255, 255, 255, .05); }
+  .convItem.active { background: rgba(0, 167, 230, .12); color: var(--text); }
+  .convItem .t { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .convItem .rm { cursor: pointer; padding: 0 4px; font-size: 12px; color: var(--text-dim); opacity: .6; }
+  .convItem .rm:hover { color: var(--danger); opacity: 1; }
+  .convItem input {
+    flex: 1; min-width: 0;
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font: inherit; font-size: 13px; padding: 4px 6px; outline: none;
+  }
+  main { min-width: 0; }
 </style>
 </head>
 <body>
 
 <header>
+  <button class="btn icon" id="btnSide" title="会话列表">会话</button>
   <img class="logo" src="/logo.png" alt="myrouter">
   <h1>myrouter</h1>
   <div class="spacer"></div>
-  <span class="hint">单会话 · 刷新页面即清空对话</span>
+  <button class="btn" id="btnAgent" title="用户画像 agent.md — AI 据此跨会话记得你">画像</button>
 </header>
 
-<main id="chat">
-  <div class="msgWrap" id="wrap">
-    <div class="empty">
-      本地 AI 聊天 · 请求经 myrouter 转发到你的上游<br>
-      Enter 发送 · Shift+Enter 换行 · 可上传文件作为附件
+<div class="mid">
+  <aside class="sidebar" id="sidebar">
+    <div class="sideHead">
+      <button class="btn primary" id="btnNew">新建对话</button>
     </div>
-  </div>
-</main>
+    <div class="convList" id="convList"></div>
+  </aside>
+  <main id="chat">
+    <div class="msgWrap" id="wrap">
+      <div class="empty">
+        本地 AI 聊天 · 请求经 myrouter 转发到你的上游<br>
+        Enter 发送 · Shift+Enter 换行 · 可上传文件作为附件 · AI 回复中的 JS 代码块可点击"运行"
+      </div>
+    </div>
+  </main>
+</div>
 
 <footer>
   <div class="modelBar">
     <label for="modelSelect">模型</label>
     <select id="modelSelect" title="选择模型"></select>
-    <button class="btn" id="btnReload" title="重新拉取模型列表">↻ 刷新</button>
+    <button class="btn" id="btnReload" title="重新拉取模型列表">刷新</button>
     <span class="hint" id="modelHint"></span>
     <span class="hint" id="ctxHint"></span>
+    <label class="hint toggle" title="AI 通过工具调用自动运行 JavaScript（关闭后 AI 不调用代码工具，代码块仅手动运行查看）">
+      <input type="checkbox" id="chkAutoRun"> 自动运行代码
+    </label>
   </div>
   <div class="composer">
     <div class="files" id="files"></div>
     <textarea id="input" rows="1" placeholder="输入消息…（Shift+Enter 换行）"></textarea>
     <div class="composerRow">
-      <button class="btn" id="btnUpload" title="上传文件（图片 / 文档 / 任意类型）">📎 附件</button>
+      <button class="btn" id="btnUpload" title="上传文件（图片 / 文档 / 任意类型）">附件</button>
       <input type="file" id="fileInput" multiple hidden>
       <div class="spacer"></div>
       <span class="hint" id="hint"></span>
@@ -228,6 +369,25 @@
   </div>
 </footer>
 
+<div class="overlay" id="agentOverlay" hidden>
+  <div class="panel" role="dialog" aria-label="用户画像">
+    <h2>用户画像 · agent.md</h2>
+    <p class="desc">
+      画像存放在 <code>.myrouter/agent.md</code>，每次聊天作为 system 消息注入，AI 借此跨会话记得你。<br>
+      可以手写维护，也可以让 AI 根据本次对话自动提炼更新——合并现有画像与对话里新的稳定信息。
+    </p>
+    <textarea id="agentInput" placeholder="# 关于我&#10;写下你是谁 / 偏好 / 习惯 / 环境&#10;留空则不注入"></textarea>
+    <div class="note" id="agentNote" hidden></div>
+    <div class="row">
+      <button class="btn" id="btnAgentGen">AI 根据对话更新</button>
+      <button class="btn" id="btnAgentSave">保存</button>
+      <div class="spacer"></div>
+      <button class="btn" id="btnAgentClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script src="/md/vendor.js"></script>
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
@@ -236,11 +396,14 @@ const wrap = $("wrap"), input = $("input"), filesBox = $("files"), modelSelect =
 let messages = [];          // OpenAI 格式消息（含多模态 content）
 let attachments = [];       // { name, size, mime, dataUri }
 let busy = false;
+let titlePending = false;   // 新会话首轮标题总结待办（失败/中断后由下一轮补）
 
 const settings = {
   get model() { return localStorage.getItem("mr.model") || ""; },
   set model(v) { localStorage.setItem("mr.model", v); },
 };
+const EMPTY_HTML = '<div class="empty">本地 AI 聊天 · 请求经 myrouter 转发到你的上游<br>' +
+  "Enter 发送 · Shift+Enter 换行 · 可上传文件作为附件 · AI 回复中的 JS 代码块可点击\"运行\"</div>";
 function addMsg(role, html, cls = "") {
   const empty = wrap.querySelector(".empty");
   if (empty) empty.remove();
@@ -261,10 +424,14 @@ function userBubble(parts) {
       const src = p.file?.data || p.file?.url || "";
       html += src.startsWith("data:image/")
         ? `<img src="${esc(src)}">`
-        : `<div style="opacity:.85">📄 ${esc(p.file?.filename || "attachment")}</div>`;
+        : `<div style="opacity:.85">${esc(p.file?.filename || "attachment")}</div>`;
     }
   }
   return html;
+}
+/** 代码运行输出的系统提示气泡（居中虚线提示样式）。 */
+function addSys(text) {
+  addMsg("user", `<div class="sysNote">${esc(text)}</div>`, "sys");
 }
 let liveBubble = null;      // 当前 AI 气泡 .bubble
 let thinkBox = null;        // 思维链 <details>（建立后不重建，保持用户展开状态）
@@ -274,7 +441,7 @@ function ensureThink() {
     thinkBox = document.createElement("details");
     thinkBox.className = "think";
     const s = document.createElement("summary");
-    s.textContent = "🧠 思考过程";
+    s.textContent = "思考过程";
     const b = document.createElement("div");
     b.className = "thinkBody";
     thinkBox.append(s, b);
@@ -323,6 +490,7 @@ function renderContent(mdText, reasoning, withCursor) {
   if (rt) {
     const body = ensureThink().querySelector(".thinkBody");
     body.innerHTML = mdToHtml(rt);
+    renderMath(body);
   }
   if (!contentNode) {
     contentNode = document.createElement("div");
@@ -330,12 +498,15 @@ function renderContent(mdText, reasoning, withCursor) {
     liveBubble.appendChild(contentNode);
   }
   contentNode.innerHTML = mdToHtml(sp.text) + (withCursor ? `<span class="cursor"></span>` : "");
-  liveBubble.scrollIntoView({ block: "nearest" });
+  renderMath(contentNode);
+  // 仅当用户已在底部附近时自动跟随流式输出（上翻历史时不打扰）
+  const nearBottom = wrap.scrollHeight - wrap.scrollTop - wrap.clientHeight < 120;
+  if (nearBottom) liveBubble.scrollIntoView({ block: "nearest" });
   return sp.text;   // 剔除思维链后的干净正文，供写入会话历史
 }
 function finishStream() {
   if (contentNode) contentNode.querySelector(".cursor")?.remove();
-  else if (!liveBubble.classList.contains("err"))
+  else if (liveBubble && !liveBubble.classList.contains("err"))
     liveBubble.innerHTML = "";   // 空回复：清掉占位，不留闪烁残留（错误气泡保留文案）
   liveBubble = null;
   thinkBox = null;
@@ -347,112 +518,57 @@ function esc(s) {
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-/* ── 轻量 Markdown 渲染（无依赖；所有内容先 esc 再套标签，防注入） ── */
-function safeUrl(u) {
-  const s = String(u).replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
-  return /^(https?:|mailto:|#)/i.test(s) ? s : "#";
-}
-function inline(t) {
-  return String(t)
-    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
-      (_, alt, url) => `<img src="${safeUrl(url)}" alt="${alt}">`)
-    .replace(/\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g,
-      (_, txt, url) => `<a href="${safeUrl(url)}" target="_blank" rel="noopener">${txt}</a>`)
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
-    .replace(/~~([^~]+)~~/g, "<del>$1</del>");
-}
-function renderBlock(block) {
-  let html = "";
-  let list = null;
-  let quote = null;
-  let codeLines = null;     // 缩进代码块（4 空格 / tab 起头）
-  // 列表累积字符串以 <ul>/<ol> 开头；flush 时必须补上闭合标签，
-  // 否则浏览器会把后续内容解析进列表内（ul 有 padding-left，逐层右移 22px → "越来越靠右"）
-  const flushList = () => {
-    if (list) {
-      html += list + (list.startsWith("<ol>") ? "</ol>" : "</ul>");
-      list = null;
+/* ── Markdown 渲染（markdown-it + highlight.js 子集，tools/vendor/build.mjs 打包，零 CDN） ── */
+const md = new myvendor.MarkdownIt({
+  html: false,          // 原始 HTML 一律转义为文本（防注入）
+  linkify: true,        // 裸 URL 自动成链接
+  highlight: (code, lang) => {
+    if (lang && myvendor.hljs.getLanguage(lang)) {
+      try { return myvendor.hljs.highlight(code, { language: lang }).value; } catch { }
     }
-  };
-  const flushQuote = () => {
-    if (quote) {
-      html += `<blockquote>${inline(quote.join("<br>"))}</blockquote>`;
-      quote = null;
-    }
-  };
-  const flushCode = () => {
-    if (codeLines) {
-      html += `<pre><code>${esc(codeLines.join("\n"))}</code></pre>`;
-      codeLines = null;
-    }
-  };
-  for (const raw of block.split("\n")) {
-    const line = raw.trim();
-    if (!line) { flushList(); flushQuote(); flushCode(); continue; }
-    // 缩进代码块：4 空格或 tab 起头，且缩进后不是列表/引用/标题标记
-    // （markdown 里 `    - x` / `    1. x` 是嵌套列表，不是代码块——误判会产生阶梯状右移；
-    //   注意 `^\d+[.)]` 必须带行首锚点，否则代码里的 `(3000)` 会被误判成有序列表标记）
-    const indented = raw.match(/^(\t+| {4,})(.*)$/);
-    if (indented && !/^[-*+>#]|^\d+[.)]/.test(indented[2])) {
-      flushList();
-      flushQuote();
-      if (!codeLines) codeLines = [];
-      codeLines.push(raw);
-      continue;
-    }
-    flushCode();
-    const h = line.match(/^(#{1,6})\s+(.*)$/);
-    if (h) { flushList(); flushQuote(); html += `<h${h[1].length}>${inline(esc(h[2]))}</h${h[1].length}>`; continue; }
-    if (/^-{3,}$/.test(line)) { flushList(); flushQuote(); html += "<hr>"; continue; }
-    const ul = line.match(/^[-*]\s+(.*)$/);
-    if (ul) {
-      flushQuote();
-      if (list && list.startsWith("<ol>")) flushList();   // 类型切换先闭合旧列表
-      list ??= "<ul>";
-      list += `<li>${inline(esc(ul[1]))}</li>`;
-      continue;
-    }
-    const ol = line.match(/^\d+[.)]\s+(.*)$/);
-    if (ol) {
-      flushQuote();
-      if (list && list.startsWith("<ul>")) flushList();
-      list ??= "<ol>";
-      list += `<li>${inline(esc(ol[1]))}</li>`;
-      continue;
-    }
-    if (line.startsWith(">")) {
-      flushList();
-      if (!quote) quote = [];
-      quote.push(esc(line.replace(/^>\s?/, "")));
-      continue;
-    }
-    flushList(); flushQuote();
-    html += `<p>${inline(esc(line))}</p>`;
+    return "";          // 未知语言：走默认转义渲染
+  },
+});
+// 链接新窗口打开 + 防反向劫持
+const defaultLinkOpen = md.renderer.rules.link_open
+  || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
+  tokens[idx].attrSet("target", "_blank");
+  tokens[idx].attrSet("rel", "noopener");
+  return defaultLinkOpen(tokens, idx, options, env, self);
+};
+// JS 代码块带"运行"按钮：代码运行结果展示在块下方（代码从 DOM 读取，流式重建无副作用）
+const defaultFence = md.renderer.rules.fence
+  || ((tokens, idx, options, env, self) => self.renderToken(tokens, idx, options));
+md.renderer.rules.fence = (tokens, idx, options, env, self) => {
+  const lang = (tokens[idx].info || "").trim().split(/\s+/)[0].toLowerCase();
+  if (lang === "js" || lang === "javascript") {
+    const code = tokens[idx].content;
+    let highlighted;
+    try { highlighted = myvendor.hljs.highlight(code, { language: "javascript" }).value; } catch { }
+    // 高亮失败回退转义原文（span 不影响 DOM 读取代码文本）
+    if (!highlighted) highlighted = esc(code);
+    return `<div class="codeWrap"><pre><code>${highlighted}</code></pre><button class="runCode">运行</button></div>`;
   }
-  flushList(); flushQuote(); flushCode();
-  return html;
-}
+  return defaultFence(tokens, idx, options, env, self);
+};
 function mdToHtml(src) {
-  const codeBlocks = [];
-  const s = String(src ?? "").replace(/```([\w+-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-    codeBlocks.push(`<pre><code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(code.replace(/\n$/, ""))}</code></pre>`);
-    return `\u0000${codeBlocks.length - 1}\u0000`;
-  });
-  let html = "";
-  let i = 0;
-  while (true) {
-    const ph = s.indexOf("\u0000", i);
-    if (ph === -1) { html += renderBlock(s.slice(i)); break; }
-    html += renderBlock(s.slice(i, ph));
-    const close = s.indexOf("\u0000", ph + 1);
-    const idx = Number(s.slice(ph + 1, close));
-    html += codeBlocks[idx];
-    i = close + 1;
-  }
-  return html;
+  return md.render(String(src ?? ""));
+}
+/** 渲染节点内 LaTeX（$...$ 行内 / $$...$$ 块级）：代码块（code/pre）由 ignoredTags 排除。
+ *  公式错误显示原文（throwOnError: false），不影响正文。 */
+function renderMath(el) {
+  try {
+    myvendor.renderMathInElement(el, {
+      delimiters: [
+        { left: "$$", right: "$$", display: true },
+        { left: "\\(", right: "\\)", display: false },
+        { left: "$", right: "$", display: false },
+      ],
+      ignoredTags: ["code", "pre", "script", "style", "textarea"],
+      throwOnError: false,
+    });
+  } catch { /* 数学渲染失败不影响正文 */ }
 }
 
 /* ── 附件 ── */
@@ -470,20 +586,109 @@ $("fileInput").addEventListener("change", () => {
 });
 function renderFiles() {
   filesBox.innerHTML = "";
-  const max = 40;
   for (let i = 0; i < attachments.length; i++) {
     const a = attachments[i];
     const chip = document.createElement("div");
     chip.className = "fileChip";
-    const thumb = a.mime.startsWith("image/") ? `<img class="thumb" src="${esc(a.dataUri)}">` : "📄";
+    const thumb = a.mime.startsWith("image/") ? `<img class="thumb" src="${esc(a.dataUri)}">` : "";
     const size = a.size >= 1048576 ? (a.size / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(a.size / 1024)) + " KB";
-    chip.innerHTML = thumb + `<span class="name">${esc(a.name)} · ${size}</span><span class="rm">✕</span>`;
+    chip.innerHTML = thumb + `<span class="name">${esc(a.name)} · ${size}</span><span class="rm">×</span>`;
     chip.querySelector(".rm").onclick = () => { attachments.splice(i, 1); renderFiles(); };
     filesBox.appendChild(chip);
   }
 }
 
 /* ── 发送 ── */
+/** 声明的工具：AI 主动决定何时执行 JS（tool_choice auto）；非工具调用的 ```js 块只是展示/手动运行。 */
+const RUN_JS_TOOL = {
+  type: "function",
+  function: {
+    name: "run_javascript",
+    description: "在浏览器沙箱执行 JavaScript 代码并返回 console.log 输出（纯计算环境：无网络、文件、DOM 访问，限时 15 秒）。用于计算、算法验证、数据处理等需要真实执行的场景。",
+    parameters: {
+      type: "object",
+      properties: {
+        code: { type: "string", description: "要执行的 JavaScript 代码" },
+      },
+      required: ["code"],
+    },
+  },
+};
+const MAX_TOOL_ROUNDS = 4;      // 工具循环上限，防死循环
+const MAX_TOOL_OUTPUT = 4000;   // 工具输出回填上限（防 token 爆炸）
+
+/** 流式请求 /chat 并渲染到当前 liveBubble，返回剔除思维链的干净正文。 */
+async function streamChat(msgs) {
+  let full = "";
+  let reasoning = "";
+  const res = await fetch("/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: modelSelect.value || undefined,
+      messages: msgs,
+      tools: [RUN_JS_TOOL],                       // 声明工具：AI 可主动决定执行 JS（非所有代码块都可运行）
+      tool_choice: autoRun.checked ? "auto" : "none",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || `HTTP ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  const toolCalls = [];   // SSE 分片累积：{ id, name, arguments }（arguments 是 JSON 字符串增量拼接）
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");   // 归一 CRLF（部分上游用 \r\n\r\n 分隔 SSE 块）
+    let idx;
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of block.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+        let j;
+        try { j = JSON.parse(data); } catch { continue; }
+        if (j.error) throw new Error(j.error);
+        const delta = j.choices?.[0]?.delta;
+        if (!delta) continue;
+        // 工具调用分片：index 定位、id/name 首次出现、arguments 增量拼接
+        if (delta.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            const t = toolCalls[tc.index] ??= { id: "", name: "", arguments: "" };
+            if (tc.id) t.id = tc.id;
+            if (tc.function?.name) t.name = tc.function.name;
+            if (tc.function?.arguments) t.arguments += tc.function.arguments;
+          }
+        }
+        // 思维链字段各家不一：DeepSeek → reasoning_content；OpenAI/OpenRouter → reasoning
+        // （字符串 / {content} / Responses 形态 {summary:[{text}]} / 数组）
+        const c = delta.content;
+        const rc = delta.reasoning_content ?? delta.reasoning;
+        let rt = "";
+        if (typeof rc === "string") rt = rc;
+        else if (typeof rc === "number") rt = String(rc);
+        else if (Array.isArray(rc)) rt = rc.map(x => x?.text ?? "").join("");
+        else if (rc) {
+          if (typeof rc.content === "string") rt = rc.content;
+          else if (Array.isArray(rc.summary)) rt = rc.summary.map(s => s?.text ?? "").join("");
+        }
+        if (c) full += c;
+        if (rt) reasoning += rt;
+        if (c || rt) renderContent(full, reasoning, true);
+      }
+    }
+  }
+  // 入会话历史的正文必须剔除 <thinking>，否则下一轮会把这些思维链回传给上游
+  const cleanAnswer = renderContent(full, reasoning, false);
+  finishStream();
+  return { content: cleanAnswer, toolCalls: toolCalls.filter(t => t.id || t.name) };
+}
+
 async function send() {
   const text = input.value.trim();
   if (busy || (!text && attachments.length === 0)) return;
@@ -503,76 +708,74 @@ async function send() {
   renderFiles();
 
   addMsg("user", userBubble(parts));
-  const userMsg = { role: "user", content: parts };
-  messages.push(userMsg);
+  const isFirstRound = messages.length === 0;   // 新会话首轮：整个回合完成后由 LLM 总结标题
+  if (isFirstRound) titlePending = true;
+  messages.push({ role: "user", content: parts });
 
-  liveBubble = addMsg("ai", "").querySelector(".bubble");   // 空占位：光标由 renderContent 动态追加/移除
-  let full = "";
-  let reasoning = "";
   try {
-    const msgs = trimMessages(messages, currentContextBudget());   // 超预算时从最旧裁剪
-    const res = await fetch("/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: modelSelect.value || undefined,
-        messages: msgs,
-      }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `HTTP ${res.status}`);
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf("\n\n")) >= 0) {
-        const block = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        for (const line of block.split("\n")) {
-          if (!line.startsWith("data:")) continue;
-          const data = line.slice(5).trim();
-          if (!data || data === "[DONE]") continue;
-          let j;
-          try { j = JSON.parse(data); } catch { continue; }
-          if (j.error) throw new Error(j.error);
-          const delta = j.choices?.[0]?.delta;
-          if (!delta) continue;
-          // 思维链字段各家不一：DeepSeek → reasoning_content；OpenAI/OpenRouter → reasoning
-          // （字符串 / {content} / Responses 形态 {summary:[{text}]} / 数组）
-          const c = delta.content;
-          const rc = delta.reasoning_content ?? delta.reasoning;
-          let rt = "";
-          if (typeof rc === "string") rt = rc;
-          else if (typeof rc === "number") rt = String(rc);
-          else if (Array.isArray(rc)) rt = rc.map(x => x?.text ?? "").join("");
-          else if (rc) {
-            if (typeof rc.content === "string") rt = rc.content;
-            else if (Array.isArray(rc.summary)) rt = rc.summary.map(s => s?.text ?? "").join("");
-          }
-          if (c) full += c;
-          if (rt) reasoning += rt;
-          if (c || rt) renderContent(full, reasoning, true);
-        }
-      }
-    }
-    // 入会话历史的正文必须剔除 <thinking>，否则下一轮会把这些思维链回传给上游
-    const cleanAnswer = renderContent(full, reasoning, false);
-    finishStream();
-    if (cleanAnswer) messages.push({ role: "assistant", content: cleanAnswer });
+    await runToolLoop();   // 工具循环：AI 决定调用 run_javascript → 执行回填 → 基于真实输出回答
+    if (titlePending) { titlePending = false; summarizeTitle(); }   // 首轮标题总结：成功后清除待办，失败下轮补
   } catch (e) {
-    liveBubble.classList.add("err");
-    liveBubble.textContent = "出错了：" + e.message;
+    if (liveBubble) {
+      liveBubble.classList.add("err");
+      liveBubble.textContent = "出错了：" + e.message;
+    }
     finishStream();
+    await convSaveCurrent();   // 失败也要落盘已收到的消息
   }
   busy = false;
   $("btnSend").disabled = false;
   $("hint").textContent = "";
+}
+
+/** 工具循环：请求 → 若 AI 发 tool_calls 则执行并回填 → 再请求，直到无工具调用（最终回答）。
+ *  所有轮次复用同一个气泡：步骤块 + 最终回答合并在一次回复里，不拆成两条对话。 */
+async function runToolLoop() {
+  const msgEl = addMsg("ai", "");   // 整个工具循环共用一个气泡
+  for (let rounds = 0; rounds < MAX_TOOL_ROUNDS; rounds++) {
+    liveBubble = msgEl.querySelector(".bubble");   // 空占位：光标由 renderContent 动态追加/移除
+    const { content, toolCalls } = await streamChat(trimMessages(messages, currentContextBudget()));
+
+    if (toolCalls.length === 0) {
+      if (content) messages.push({ role: "assistant", content });
+      await convSaveCurrent();
+      return;
+    }
+
+    // 有工具调用：assistant 消息带 tool_calls（OpenAI 格式）入库，UI 在同一气泡里追加执行步骤
+    messages.push({
+      role: "assistant",
+      content: content || null,
+      tool_calls: toolCalls.map(tc => ({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } })),
+    });
+    for (const tc of toolCalls) {
+      const output = tc.name === "run_javascript"
+        ? await runToolCall(tc, msgEl)
+        : "未知工具: " + tc.name;
+      messages.push({ role: "tool", tool_call_id: tc.id, content: truncateText(output) });
+    }
+    await convSaveCurrent();   // 工具步骤落盘，中途失败不丢
+  }
+  // 超出循环上限：停止并提示（历史已含全部 tool 结果，用户可继续追问）
+  liveBubble = msgEl.querySelector(".bubble");
+  liveBubble.classList.add("err");
+  liveBubble.append("工具调用超过 " + MAX_TOOL_ROUNDS + " 轮，已停止");
+  finishStream();
+}
+
+/** 执行一个工具调用：在气泡里渲染代码步骤块，沙箱运行，返回输出文本（不含耗时后缀）。 */
+async function runToolCall(tc, msgEl) {
+  const code = toolCallCode(tc);
+  const box = document.createElement("div");
+  box.className = "toolCall";
+  box.innerHTML = toolCallHtml(code);
+  msgEl.querySelector(".bubble").appendChild(box);
+  return (await runCode(code, box)).output;
+}
+
+function truncateText(s, n = MAX_TOOL_OUTPUT) {
+  s = String(s ?? "");
+  return s.length > n ? s.slice(0, n) + "\n…（输出已截断）" : s;
 }
 $("btnSend").addEventListener("click", send);
 input.addEventListener("keydown", e => {
@@ -661,7 +864,7 @@ function msgTokens(m) {
       if (!p) continue;
       if (p.type === "text") c += estTokens(p.text);
       else if (p.type === "image_url") c += 1000;               // 图片按固定粗略值
-      else if (p.type === "file") c += estTokens(p.file?.data || p.file?.url || "");
+      else if (p.type === "file") c += 500;                     // 附件同样固定计费（base64 全文统计会撑爆预算）
     }
   }
   return c + 4;   // 每条消息的角色/结构开销
@@ -676,10 +879,391 @@ function trimMessages(list, budget) {
     total -= costs[drop];
     drop++;
   }
+  // 工具轮完整性：保留区头部不能是孤立 tool 消息（tool 必须与所属 assistant(tool_calls) 配对，否则上游 400）——
+  // 配对在丢弃区则回退整轮保留（正确性优先于预算），游离 tool 直接丢弃
+  while (drop < list.length && list[drop]?.role === "tool") {
+    const m = list[drop];
+    let pair = -1;
+    for (let p = drop - 1; p >= 0; p--) {
+      const pv = list[p];
+      if (pv.role === "assistant" && Array.isArray(pv.tool_calls)
+        && pv.tool_calls.some(t => t.id === m.tool_call_id)) { pair = p; break; }
+    }
+    if (pair === -1) { total -= costs[drop]; drop++; }   // 游离 tool：丢弃
+    else { drop = pair; break; }                          // 回退到所属 assistant，整轮保留
+  }
   return drop === 0 ? list : list.slice(drop);
 }
 
-input.focus();
+/* ── 用户画像 agent.md：查看 / 编辑 / AI 根据对话更新 ── */
+const agentOverlay = $("agentOverlay"), agentInput = $("agentInput"), agentNote = $("agentNote");
+function agentNoteShow(text, cls = "") {
+  agentNote.textContent = text;
+  agentNote.className = "note " + cls;
+  agentNote.hidden = false;
+}
+async function agentLoad() {
+  agentNote.hidden = true;
+  try {
+    const res = await fetch("/agent");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const j = await res.json();
+    agentInput.value = j.content || "";
+  } catch (e) { agentNoteShow("读取失败：" + e.message, "err"); }
+}
+/** POST /agent：{ content } 保存，{ messages } AI 提炼并保存；返回新画像内容。 */
+async function agentPost(body) {
+  const res = await fetch("/agent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(j.error || ("HTTP " + res.status));
+  return j.content || "";
+}
+$("btnAgent").addEventListener("click", () => {
+  agentOverlay.hidden = false;
+  agentLoad();
+});
+$("btnAgentClose").addEventListener("click", () => { agentOverlay.hidden = true; });
+agentOverlay.addEventListener("click", e => { if (e.target === agentOverlay) agentOverlay.hidden = true; });
+$("btnAgentSave").addEventListener("click", async () => {
+  $("btnAgentSave").disabled = true;
+  try {
+    await agentPost({ content: agentInput.value });
+    agentNoteShow("已保存，下次聊天生效", "ok");
+  } catch (e) { agentNoteShow("保存失败：" + e.message, "err"); }
+  $("btnAgentSave").disabled = false;
+});
+$("btnAgentGen").addEventListener("click", async () => {
+  if (messages.length === 0) { agentNoteShow("先聊几句，AI 才有内容可提炼", "err"); return; }
+  $("btnAgentGen").disabled = true;
+  $("btnAgentGen").textContent = "生成中…";
+  try {
+    const content = await agentPost({ messages });
+    agentInput.value = content;
+    agentNoteShow("已根据对话更新画像并保存", "ok");
+  } catch (e) { agentNoteShow("生成失败：" + e.message, "err"); }
+  $("btnAgentGen").disabled = false;
+  $("btnAgentGen").textContent = "AI 根据对话更新";
+});
+
+/* ── 会话管理：多会话列表（新建/切换/删除/重命名），每轮结束自动保存 ── */
+let conversations = [];
+let activeId = "";
+const convListBox = $("convList");
+
+function convRender() {
+  convListBox.innerHTML = "";
+  for (const c of conversations) {
+    const item = document.createElement("div");
+    item.className = "convItem" + (c.id === activeId ? " active" : "");
+    const t = document.createElement("span");
+    t.className = "t";
+    t.textContent = c.title || "新对话";
+    const rm = document.createElement("span");
+    rm.className = "rm";
+    rm.textContent = "删除";
+    rm.title = "删除会话";
+    item.append(t, rm);
+    item.addEventListener("click", () => { if (c.id !== activeId) convSwitch(c.id); });
+    t.addEventListener("dblclick", () => convRename(c.id, item, t));
+    rm.addEventListener("click", e => { e.stopPropagation(); convDelete(c.id); });
+    convListBox.appendChild(item);
+  }
+}
+async function convListLoad() {
+  try {
+    const res = await fetch("/conversations");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    conversations = (await res.json()).items || [];
+  } catch { /* 加载失败沿用旧列表 */ }
+  convRender();
+}
+/** 保存当前会话（messages 为干净历史，不含注入的画像 system）。 */
+async function convSaveCurrent() {
+  if (!activeId) return;
+  try {
+    await fetch("/conversations/" + activeId, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages }),
+    });
+    convListLoad();
+  } catch { /* 保存失败静默 */ }
+}
+/** 新会话首轮：让 LLM 根据对话总结标题（覆盖自动截取的临时标题）。
+ *  只发送文本消息（剥离图片/文件附件，避免 base64 大 payload 撑爆标题生成请求）。 */
+async function summarizeTitle() {
+  if (!activeId) return;
+  const textOnly = [];
+  for (const m of messages) {
+    if (!m || m.content == null) continue;
+    if (typeof m.content === "string") { textOnly.push(m); continue; }
+    if (Array.isArray(m.content)) {
+      const parts = m.content.filter(p => p && p.type === "text");
+      if (parts.length > 0) textOnly.push({ role: m.role, content: parts });
+    }
+  }
+  if (textOnly.length === 0) return;
+  try {
+    await fetch("/conversations/" + activeId + "/title", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: textOnly }),
+    });
+    convListLoad();
+  } catch { /* 总结失败静默，保留自动截取的标题 */ }
+}
+function normParts(content) {
+  if (typeof content === "string") return [{ type: "text", text: content }];
+  if (Array.isArray(content)) return content;
+  return [];
+}
+/** 从 tool_calls 里提取 run_javascript 的代码（arguments 是 {code} 的 JSON 字符串）。 */
+function toolCallCode(tc) {
+  const args = tc?.arguments ?? tc?.function?.arguments;
+  try { return JSON.parse(args || "{}").code || ""; }
+  catch { return args || ""; }
+}
+/** 工具步骤块 HTML：标题 + 代码 + 可选输出（实时流与历史回放共用，保证同一种样式）。 */
+function toolCallHtml(code, output) {
+  return `<div class="toolCall"><div class="toolTitle">运行 JavaScript</div><pre><code>${esc(code)}</code></pre>` +
+    (output != null ? `<div class="codeOut">${esc(output)}</div>` : "") + "</div>";
+}
+function convRenderBody() {
+  $("wrap").innerHTML = "";
+  if (messages.length === 0) {
+    $("wrap").innerHTML = EMPTY_HTML;
+    return;
+  }
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === "user") {
+      // 自动注入的代码运行输出：渲染为居中的提示样式，而非普通用户气泡
+      if (typeof m.content === "string" && m.content.startsWith("代码运行输出："))
+        addSys(m.content);
+      else addMsg("user", userBubble(normParts(m.content)));
+    }
+    else if (m.role === "assistant" && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      // 工具调用轮次：连续的工具步骤（含各自输出）与随后的最终回答合并在一个气泡（与实时流一致）
+      let html = "";
+      while (i < messages.length && messages[i].role === "assistant"
+        && Array.isArray(messages[i].tool_calls) && messages[i].tool_calls.length) {
+        const cur = messages[i];
+        if (cur.content) html += `<div class="prose">${mdToHtml(cur.content)}</div>`;
+        const outs = {};   // tool_call_id -> 输出
+        let j = i + 1;
+        while (j < messages.length && messages[j].role === "tool") { outs[messages[j].tool_call_id] = messages[j].content; j++; }
+        for (const c of cur.tool_calls) html += toolCallHtml(toolCallCode(c), outs[c.id]);
+        i = j - 1;   // 越过已消费的 tool 消息（for 的 i++ 后指向下一条）
+      }
+      const next = messages[i + 1];
+      if (next && next.role === "assistant" && next.content
+        && !(Array.isArray(next.tool_calls) && next.tool_calls.length)) {
+        html += `<div class="prose">${mdToHtml(next.content)}</div>`;
+        i++;
+      }
+      renderMath(addMsg("ai", html));
+    }
+    else if (m.role === "assistant") {
+      renderMath(addMsg("ai", mdToHtml(m.content || "")));
+    }
+    else if (m.role === "tool") {   // 游离 tool 消息（异常中断的历史）兜底
+      addSys("代码运行输出：\n" + m.content);
+    }
+  }
+  scrollBottom();
+}
+async function convSwitch(id) {
+  if (busy) return;
+  await convSaveCurrent();
+  titlePending = false;   // 标题待办是当前会话的状态，切换后复位
+  activeId = id;
+  localStorage.setItem("mr.activeConv", id);
+  try {
+    const res = await fetch("/conversations/" + id);
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const j = await res.json();
+    messages = Array.isArray(j.messages) ? j.messages : [];
+  } catch { messages = []; }
+  convRenderBody();
+  convRender();
+}
+async function convNew() {
+  if (busy) return;
+  try {
+    await convSaveCurrent();
+    const res = await fetch("/conversations", { method: "POST" });
+    const j = await res.json();
+    activeId = j.id || "";
+    titlePending = false;
+    if (activeId) localStorage.setItem("mr.activeConv", activeId);
+    messages = [];
+    convRenderBody();
+    convListLoad();
+    input.focus();
+  } catch { /* 新建失败静默 */ }
+}
+async function convDelete(id) {
+  try {
+    await fetch("/conversations/" + id, { method: "DELETE" });
+  } catch { /* 删除失败静默 */ }
+  if (id === activeId) {
+    activeId = "";
+    localStorage.removeItem("mr.activeConv");
+    await convListLoad();
+    if (conversations.length > 0) await convSwitch(conversations[0].id);
+    else await convNew();
+  } else {
+    convListLoad();
+  }
+}
+function convRename(id, item, titleEl) {
+  const inp = document.createElement("input");
+  inp.value = titleEl.textContent;
+  item.replaceChild(inp, titleEl);
+  inp.focus();
+  const done = async () => {
+    const title = inp.value.trim();
+    try {
+      await fetch("/conversations/" + id, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+    } catch { /* 重命名失败静默 */ }
+    convListLoad();
+  };
+  inp.addEventListener("keydown", e => {
+    if (e.key === "Enter") done();
+    else if (e.key === "Escape") convListLoad();
+  });
+  inp.addEventListener("blur", done);
+}
+async function convInit() {
+  await convListLoad();   // 失败时沿用空列表，走新建兜底
+  const saved = localStorage.getItem("mr.activeConv");
+  if (saved && conversations.some(c => c.id === saved))
+    await convSwitch(saved);
+  else if (conversations.length > 0)
+    await convSwitch(conversations[0].id);
+  else
+    await convNew();
+  input.focus();
+}
+$("btnNew").addEventListener("click", convNew);
+
+/* ── JS 代码运行（原生 JS + Web Worker：死循环由超时 terminate 中断） ── */
+const CODE_TIMEOUT_MS = 15000;   // 超时上限：防死循环/超长执行（合法慢计算也有余量）
+const autoRun = $("chkAutoRun");
+autoRun.checked = localStorage.getItem("mr.autoRun") !== "0";   // 默认开
+autoRun.addEventListener("change", () => localStorage.setItem("mr.autoRun", autoRun.checked ? "1" : "0"));
+/** 值格式化：对象走 JSON（bigint 转字符串），循环引用/异常回退 String。 */
+function fmtValue(v) {
+  if (typeof v === "string") return v;
+  if (typeof v === "undefined") return "undefined";
+  if (typeof v === "function") return "function()";
+  if (v === null) return "null";
+  if (typeof v === "object") {
+    try {
+      const s = JSON.stringify(v, (k, x) => typeof x === "bigint" ? x.toString() : x);
+      return s === undefined ? String(v) : s;
+    } catch { return String(v); }
+  }
+  return String(v);
+}
+/** JS 执行核心：返回 { ok, lines } 或 { ok:false, error }。同步执行（仅供验证脚本使用；
+ *  生产一律走下方 Worker 路径，防死循环卡死页面）。 */
+function codeRunCore(code) {
+  const saved = [console.log, console.info, console.warn, console.error];
+  const lines = [];
+  const push = (...args) => lines.push(args.map(fmtValue).join(" "));
+  console.log = console.info = console.warn = console.error = push;
+  try {
+    new Function(code)();
+    return { ok: true, lines };
+  } catch (e) {
+    return { ok: false, error: (e && e.stack) ? e.stack : String(e) };
+  } finally {
+    [console.log, console.info, console.warn, console.error] = saved;
+  }
+}
+// Worker 脚本：独立线程执行 JS。沙箱移除网络/外部加载能力（纯计算）；
+// console.* 劫持收集输出；主线程超时 terminate 兜底死循环。
+const CODE_WORKER_CODE = [
+  "self.onmessage = function(e) {",
+  "  try { self.fetch = undefined; } catch (err) {}",
+  "  try { self.XMLHttpRequest = undefined; } catch (err) {}",
+  "  try { self.WebSocket = undefined; } catch (err) {}",
+  "  try { self.importScripts = undefined; } catch (err) {}",
+  "  var lines = [];",
+  "  var fmt = (" + fmtValue + ");",   // 与页面 fmtValue 单一来源，避免双份格式化逻辑漂移
+  "  function push() {",
+  "    var parts = [];",
+  "    for (var i = 0; i < arguments.length; i++) parts.push(fmt(arguments[i]));",
+  "    lines.push(parts.join(' '));",
+  "  }",
+  "  console.log = console.info = console.warn = console.error = push;",
+  "  try {",
+  "    new Function(e.data.code)();",
+  "    self.postMessage({ ok: true, lines: lines });",
+  "  } catch (err) {",
+  "    self.postMessage({ ok: false, error: (err && err.stack) ? err.stack : String(err) });",
+  "  }",
+  "};",
+].join("\n");
+function runCode(code, container) {
+  return new Promise(resolve => {
+    container.querySelector(".codeOut")?.remove();
+    const out = document.createElement("div");
+    out.className = "codeOut";
+    container.appendChild(out);
+    const t0 = performance.now();
+    // 每次执行独立 Worker、用完即终止：用户代码无法通过篡改 onmessage 污染后续执行
+    const worker = new Worker(URL.createObjectURL(new Blob([CODE_WORKER_CODE], { type: "text/javascript" })));
+    const finish = (result) => {
+      const text = result.ok
+        ? (result.lines.length ? result.lines.join("\n") : "(无输出)")
+        : "错误: " + (result.error || "未知错误");
+      out.textContent = text + "\n耗时 " + (performance.now() - t0).toFixed(0) + " ms";
+      out.classList.add(result.ok ? "ok" : "err");
+      resolve({ text: out.textContent, output: text });   // output：纯结果（回填工具消息用，不含耗时）
+    };
+    const timer = setTimeout(() => {   // 死循环/超长：终止 worker 强制中断
+      try { worker.terminate(); } catch { }
+      finish({ ok: false, error: "执行超时（超过 " + CODE_TIMEOUT_MS / 1000 + " 秒），已终止" });
+    }, CODE_TIMEOUT_MS);
+    worker.onmessage = e => { clearTimeout(timer); finish(e.data); };
+    worker.onerror = () => { clearTimeout(timer); finish({ ok: false, error: "Worker 异常" }); };
+    worker.postMessage({ code });
+  });
+}
+wrap.addEventListener("click", e => {
+  const btn = e.target.closest?.(".runCode");
+  if (!btn || busy || btn.disabled) return;
+  const w = btn.closest(".codeWrap");
+  btn.disabled = true;
+  btn.textContent = "运行中…";
+  runCode(w.querySelector("pre code").textContent, w).then(() => {
+    btn.disabled = false;
+    btn.textContent = "重新运行";
+  });
+});
+
+$("btnSide").addEventListener("click", () => {
+  $("sidebar").classList.toggle("collapsed");
+});
+// 刷新/关闭页面兜底：sendBeacon 把未保存的当前会话发走（await 保存后此路极少触发）
+if (typeof window !== "undefined")
+  window.addEventListener("beforeunload", () => {
+    if (activeId && messages.length > 0)
+      navigator.sendBeacon?.("/conversations/" + activeId,
+        new Blob([JSON.stringify({ messages })], { type: "application/json" }));
+  });
+
+convInit();
 </script>
 </body>
 </html>

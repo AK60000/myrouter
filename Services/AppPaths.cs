@@ -4,7 +4,7 @@ using System.IO;
 namespace myrouter.Services;
 
 /// <summary>
-/// 运行期数据目录：exe 同目录下的 .myrouter/，集中存放配置/记忆等非程序本体文件，
+/// 运行期数据目录：exe 同目录下的 .myrouter/，集中存放配置/画像等非程序本体文件，
 /// 便于整体拷贝迁移，也避免散落在 exe 旁边。
 /// </summary>
 public static class AppPaths
@@ -12,7 +12,8 @@ public static class AppPaths
     public static string DataDir => Path.Combine(AppContext.BaseDirectory, ".myrouter");
 
     public static string ConfigFile => Path.Combine(DataDir, "myrouter.config.json");
-    public static string MemoryFile => Path.Combine(DataDir, "memory.json");
+    public static string AgentFile => Path.Combine(DataDir, "agent.md");       // 用户画像，手写维护，聊天时注入
+    public static string ConversationsFile => Path.Combine(DataDir, "conversations.json");   // Web 对话历史
     public static string CompanionFile => Path.Combine(DataDir, "companion.json");
 
     public static void EnsureDir() => Directory.CreateDirectory(DataDir);
@@ -28,7 +29,6 @@ public static class AppPaths
             foreach (var (legacyName, target) in new[]
             {
                 ("myrouter.config.json", ConfigFile),
-                ("memory.json", MemoryFile),
                 ("companion.json", CompanionFile),
             })
             {

@@ -1,0 +1,14 @@
+{
+  "name": "myrouter-vendor",
+  "private": true,
+  "description": "第三方前端依赖打包（markdown-it 渲染 + highlight.js 代码高亮子集），产物嵌入 exe",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "highlight.js": "^11.10.0",
+    "katex": "^0.18.7",
+    "markdown-it": "^14.1.0"
+  }
+}

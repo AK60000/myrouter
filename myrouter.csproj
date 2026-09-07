@@ -31,6 +31,10 @@
     <EmbeddedResource Include="myrouter.ico" />
     <!-- Web 界面单文件页面：打进 exe，浏览器访问 http://localhost:{port}/ 即用 -->
     <EmbeddedResource Include="content\index.html" />
+    <!-- 前端第三方依赖（markdown-it + highlight.js + KaTeX，tools/vendor/build.mjs 可重新构建） -->
+    <EmbeddedResource Include="tools\vendor\vendor.bundle.js" LogicalName="myrouter.vendor.js" />
+    <!-- KaTeX 样式（字体 base64 内嵌，零外部请求） -->
+    <EmbeddedResource Include="tools\vendor\katex.css" LogicalName="myrouter.katex.css" />
   </ItemGroup>
 
 </Project>
