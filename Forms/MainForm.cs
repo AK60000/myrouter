@@ -57,7 +57,7 @@ public class MainForm : Form
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimizeBox = true;
         MaximizeBox = true;
-        Icon = LoadAppIcon();
+        Icon = AppIcon.Value;
 
         BuildLayout();
         InitTray();
@@ -107,7 +107,7 @@ public class MainForm : Form
             _menuExit,
         });
 
-        _tray.Icon = LoadAppIcon();
+        _tray.Icon = AppIcon.Value;
         _tray.Text = "myrouter";
         _tray.Visible = false;
         _tray.ContextMenuStrip = _trayMenu;
@@ -151,7 +151,8 @@ public class MainForm : Form
         _menuStop.Enabled = running;
     }
 
-    private static Icon LoadAppIcon()
+    /// <summary>应用图标（内嵌 myrouter.ico，解码一次缓存——窗体/托盘/头像共用）。</summary>
+    private static readonly Lazy<Icon> AppIcon = new(() =>
     {
         var asm = typeof(MainForm).Assembly;
         var name = asm.GetManifestResourceNames()
@@ -159,7 +160,7 @@ public class MainForm : Form
         if (name is null) return SystemIcons.Application;
         using var stream = asm.GetManifestResourceStream(name);
         return stream is null ? SystemIcons.Application : new Icon(stream);
-    }
+    });
 
     private void BuildLayout()
     {
@@ -395,7 +396,7 @@ public class MainForm : Form
         _companionAvatar.Size = new Size(26, 26);
         _companionAvatar.Dock = DockStyle.Left;
         _companionAvatar.SizeMode = PictureBoxSizeMode.Zoom;
-        _companionAvatar.Image = LoadAppIcon().ToBitmap();
+        _companionAvatar.Image = AppIcon.Value.ToBitmap();
         _companionAvatar.Margin = new Padding(2, 6, 4, 0);
         bar.Controls.Add(_companionAvatar, 0, 0);
 

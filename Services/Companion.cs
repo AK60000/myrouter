@@ -26,6 +26,10 @@ public class Companion
     }
 
     private const int HistoryDays = 60; // 与 LLM 缓存窗口无关，只是历史档期上限
+    private static readonly JsonSerializerOptions SaveJsonOptions = new(JsonOpts.Unsafe)
+    {
+        WriteIndented = true,
+    };
 
     private readonly ProxyServer _proxy;
     private readonly string _path;
@@ -67,7 +71,7 @@ public class Companion
         var dTok = (s.TokensIn + s.TokensOut) - _lastTokens;
         if (dReq > 0)
         {
-            var key = now.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+            var key = DayKey(now);
             if (!_data.History.TryGetValue(key, out var day))
             {
                 day = new DayRecord();
@@ -84,8 +88,7 @@ public class Companion
 
     private void TrimHistory()
     {
-        var cutoff = DateTime.Today.AddDays(-HistoryDays)
-            .ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+        var cutoff = DayKey(DateTime.Today.AddDays(-HistoryDays));
         foreach (var k in _data.History.Keys
                      .Where(k => string.CompareOrdinal(k, cutoff) < 0).ToList())
             _data.History.Remove(k);
@@ -131,9 +134,12 @@ public class Companion
 
     private bool TryGetCount(DateTime day, out DayRecord rec)
     {
-        var key = day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
-        return _data.History.TryGetValue(key, out rec!);
+        return _data.History.TryGetValue(DayKey(day), out rec!);
     }
+
+    /// <summary>历史档期的日期键（本地时区 yyyy-MM-dd，跨天/裁剪/查询共用同一格式）。</summary>
+    private static string DayKey(DateTime day) =>
+        day.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
 
     private void Load()
     {
@@ -152,8 +158,7 @@ public class Companion
     {
         try
         {
-            File.WriteAllText(_path,
-                JsonSerializer.Serialize(_data, new JsonSerializerOptions { WriteIndented = true }));
+            File.WriteAllText(_path, JsonSerializer.Serialize(_data, SaveJsonOptions));
         }
         catch { /* 记忆文件写失败不影响主流程 */ }
     }

@@ -501,12 +501,13 @@ public class ProxyServer : IDisposable
             if (payload["messages"] is JsonArray msgs)
                 messages = msgs.Select(m => (m as JsonObject) ?? new JsonObject()).ToList();
             string? title = payload["title"] is JsonValue tv && tv.TryGetValue<string>(out var ts) ? ts : null;
-            if (!_conversations.Save(id, title, messages))
+            var savedTitle = _conversations.Save(id, title, messages);
+            if (savedTitle is null)
             {
                 await WriteChatError(ctx, 404, "会话不存在");
                 return;
             }
-            await WriteJson(ctx, new { ok = true, id, title = _conversations.Get(id)?.Title ?? "" });
+            await WriteJson(ctx, new { ok = true, id, title = savedTitle });
             return;
         }
 
@@ -525,19 +526,14 @@ public class ProxyServer : IDisposable
         var title = await AskUpstreamAsync(
             "为这段对话生成标题，不超过 20 字，不加标点与引号，直接输出标题。",
             MessagesToText(msgs), "x-title-refine", model);
-        if (title is null)
-        {
-            await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, "标题生成失败（请检查上游配置与 key）");
-            return;
-        }
-        title = StripThinking(title);   // 推理模型输出可能带思维链块，剥掉再取标题
+        if (title is not null) title = StripThinking(title);   // 推理模型输出可能带思维链块，剥掉再取标题
         if (string.IsNullOrWhiteSpace(title))
         {
             await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, "标题生成失败（请检查上游配置与 key）");
             return;
         }
         title = title.Trim().Trim('"', '\'', '「', '」', '《', '》', '“', '”', '，', '。');
-        if (!_conversations.Save(id, title, null))
+        if (_conversations.Save(id, title, null) is null)
         {
             await WriteChatError(ctx, 404, "会话不存在");
             return;

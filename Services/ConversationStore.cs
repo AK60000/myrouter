@@ -94,20 +94,21 @@ public class ConversationStore
         }
     }
 
-    /// <summary>保存会话（标题/消息可分别更新）。标题为空时自动取第一条用户消息前 20 字。</summary>
-    public bool Save(string id, string? title, List<JsonObject>? messages)
+    /// <summary>保存会话（标题/消息可分别更新）。标题为空时自动取第一条用户消息前 20 字。
+    /// 返回保存后的最终标题；会话不存在返回 null。</summary>
+    public string? Save(string id, string? title, List<JsonObject>? messages)
     {
         lock (_lock)
         {
             var c = _data.Conversations.FirstOrDefault(x => x.Id == id);
-            if (c is null) return false;
+            if (c is null) return null;
             if (messages is not null) c.Messages = messages;
             if (!string.IsNullOrWhiteSpace(title)) c.Title = title.Trim();
             if (string.IsNullOrWhiteSpace(c.Title) && c.Messages.Count > 0)
                 c.Title = ExtractTitle(c.Messages);
             c.UpdatedAt = DateTime.Now.ToString("s");
             Save();
-            return true;
+            return c.Title;
         }
     }
 
