@@ -310,6 +310,51 @@ $("btnSide")._handlers.click();
 assert(sideBar.classList.contains("collapsed"), "btnSide collapses sidebar");
 $("btnSide")._handlers.click();
 assert(!sideBar.classList.contains("collapsed"), "btnSide expands sidebar again");
+
+// 17. trimMessages：预算裁剪、工具轮完整性（配对回退/游离丢弃）、至少保留最近一轮
+const long1 = "字".repeat(800);   // estTokens ≈ 960/条
+let tList = [];
+for (let i = 0; i < 10; i++) tList.push({ role: i % 2 ? "assistant" : "user", content: long1 });
+const t1 = trimMessages(tList, 3000);   // 960×10 总 9600，预算 3000 → 裁到剩 3 条（2880 ≤ 3000）
+assert(t1.length === 3 && t1[0].content === long1, "trim drops oldest until budget fits, keeps >=2: " + t1.length);
+const tSingle = trimMessages([{ role: "user", content: "x" }], 1);
+assert(tSingle.length === 1, "trim keeps single message");
+const tFull = [{ role: "user", content: "hi" }, { role: "assistant", content: "yo" }];
+assert(trimMessages(tFull, 10000) === tFull, "trim returns same array within budget");
+
+// 工具轮完整性：裁剪点落在 tool 消息 → 回退整轮保留（assistant(tool_calls) + tool 必须成对）
+const toolPair = [
+  { role: "user", content: long1 },
+  { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "run_javascript", arguments: "{}" } }] },
+  { role: "tool", tool_call_id: "c1", content: long1 },
+  { role: "user", content: "好" },
+];
+const t3 = trimMessages(toolPair, 100);
+assert(t3.length === 3 && t3[0].role === "assistant" && Array.isArray(t3[0].tool_calls) && t3[1].role === "tool",
+  "trim rolls back to paired tool round: " + JSON.stringify(t3.map(m => m.role)));
+// 游离 tool（无配对 assistant）→ 丢弃
+const orphan = [
+  { role: "user", content: long1 },
+  { role: "tool", tool_call_id: "orphan", content: long1 },
+  { role: "user", content: "好" },
+];
+const t4 = trimMessages(orphan, 100);
+assert(t4.length === 1 && t4[0].role === "user", "trim drops orphan tool message: " + JSON.stringify(t4.map(m => m.role)));
+
+// 18. estTokens / msgTokens：CJK 与 ASCII 粗略换算、图片固定计费
+assert(estTokens("你好") === 3, "estTokens cjk ~1.2/char");
+assert(estTokens("abc") === 1, "estTokens ascii ~0.3/char");
+const imgTok = msgTokens({ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] });
+assert(imgTok === 1004, "image part flat 1000 + per-message overhead: " + imgTok);
+
+// 19. currentContextBudget：模型 context_length 的 60% 取整、缺省 32k、下限 2048
+modelCtx = { "m-big": 100000, "m-tiny": 3000 };
+modelSelect.value = "m-big";
+assert(currentContextBudget() === 60000, "budget = 60% of context_length: " + currentContextBudget());
+modelSelect.value = "m-tiny";
+assert(currentContextBudget() === 2048, "budget floors at 2048: " + currentContextBudget());
+modelSelect.value = "";
+assert(currentContextBudget() === 19200, "default context 32k when unknown: " + currentContextBudget());
 }
 `;
 

@@ -39,6 +39,12 @@ internal static class Program
                     reqBody = await sr.ReadToEndAsync();
                 }
 
+                // 整个请求处理包 try/catch：客户端断连导致的写失败（如 proxy 超时断开上游）或 mock 分支内部
+                // 异常都必须隔离在单个请求内，不能终止 mock 线程——否则后续用例全部失败（曾实测踩过）
+                // （分支代码保持原缩进，try 块作用域以末尾 catch 收口）
+                try
+                {
+
                 // /slow 特殊路径：模拟上游响应缓慢，用于验证超时配置生效
                 if (path == "/slow")
                 {
@@ -70,7 +76,8 @@ internal static class Program
                 if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST" &&
                     reqBody.Contains("x-agent-refine"))
                 {
-                    if (!reqBody.Contains("\"model\"") || reqBody.Contains("thinking"))
+                    // "think" 子串同时覆盖 <thinking> 与 <think> 残留（两种标签都须在提炼前剥离，否则画像会被污染）
+                    if (!reqBody.Contains("\"model\"") || reqBody.Contains("think"))
                     {
                         var eBytes = System.Text.Encoding.UTF8.GetBytes("{\"error\":\"model required or thinking not stripped\"}");
                         ctx.Response.ContentType = "application/json";
@@ -80,8 +87,9 @@ internal static class Program
                         ctx.Response.Close();
                         continue;
                     }
+                    // mock 返回带思维链块的画像：输出侧须剥离后才写盘，否则画像被污染（响应与磁盘都不该出现 thinking）
                     const string agentJson =
-                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"我是 Bobby，喜欢喝咖啡。\\n我在学 Spring Boot。\"}}]}";
+                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"<thinking>用户偏好咖啡，近期在学后端</thinking>我是 Bobby，喜欢喝咖啡。\\n我在学 Spring Boot。\"}}]}";
                     var aBytes = System.Text.Encoding.UTF8.GetBytes(agentJson);
                     ctx.Response.ContentType = "application/json";
                     ctx.Response.ContentLength64 = aBytes.Length;
@@ -104,13 +112,35 @@ internal static class Program
                         ctx.Response.Close();
                         continue;
                     }
+                    // mock 返回带思维链块的标题：输出侧须剥离后才是干净标题
                     const string titleJson =
-                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"和小李的对话\"}}]}";
+                        "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"<thinking>这段对话的主角是小李</thinking>和小李的对话\"}}]}";
                     var tBytes = System.Text.Encoding.UTF8.GetBytes(titleJson);
                     ctx.Response.ContentType = "application/json";
                     ctx.Response.ContentLength64 = tBytes.Length;
                     await ctx.Response.OutputStream.WriteAsync(tBytes);
                     ctx.Response.Close();
+                    continue;
+                }
+
+                // /v1/chat/completions POST：模拟流式中途长时间停顿（body 带 x-idle-slow 标记）——
+                // 首块立即发出，随后停 3 秒（> 1s 空闲超时）才补 [DONE]，用于验证 /chat 的空闲超时
+                if (path == "/v1/chat/completions" && ctx.Request.HttpMethod == "POST" &&
+                    reqBody.Contains("x-idle-slow"))
+                {
+                    ctx.Response.ContentType = "text/event-stream";
+                    ctx.Response.SendChunked = true;
+                    try
+                    {
+                        await ctx.Response.OutputStream.WriteAsync(
+                            System.Text.Encoding.UTF8.GetBytes("data: {\"choices\":[{\"delta\":{\"content\":\"你好\"}}]}\n\n"));
+                        ctx.Response.OutputStream.Flush();
+                        await Task.Delay(3000);
+                        await ctx.Response.OutputStream.WriteAsync(
+                            System.Text.Encoding.UTF8.GetBytes("data: [DONE]\n\n"));
+                    }
+                    catch { /* proxy 空闲超时断开上游连接后写失败是预期 */ }
+                    try { ctx.Response.Close(); } catch { }   // Close 同样可能因断连抛，不能放 finally 打崩 mock 线程
                     continue;
                 }
 
@@ -151,6 +181,8 @@ internal static class Program
                 ctx.Response.ContentLength64 = bytes.Length;
                 await ctx.Response.OutputStream.WriteAsync(bytes);
                 ctx.Response.Close();
+                }
+                catch { /* 单个 mock 请求异常（断连写失败等）不影响主循环 */ }
             }
         });
 
@@ -483,14 +515,18 @@ internal static class Program
                 RequireAuth = false,
             }, async h =>
             {
-                File.WriteAllText(proxyAgentPath, "我是 Bobby，喜欢喝咖啡。");
+                File.WriteAllText(proxyAgentPath, "我是 Bobby，喜欢喝咖啡。<thinking>早期版本混入的思维链残留</thinking>");
                 try
                 {
                     var r = await h.PostAsync($"http://localhost:{proxyPort}/chat",
                         new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"介绍一下你自己\"}]}",
                             System.Text.Encoding.UTF8, "application/json"));
                     var b = await r.Content.ReadAsStringAsync();
-                    return r.StatusCode == HttpStatusCode.OK && b.Contains("我是 Bobby")
+                    // 注入前须剥离存量思维链：system 里有画像正文、没有 thinking 残留。
+                    // mock 的 SSE 会回显请求体（echo.body）并附带自身 thinking 内容（choices.delta），
+                    // 因此只检查 echo 段（含注入的 system），不检查 choices 段
+                    var echo = b.Split("choices")[0];
+                    return r.StatusCode == HttpStatusCode.OK && b.Contains("我是 Bobby") && !echo.Contains("<thinking>")
                         ? null
                         : $"agent.md not injected: {b[..Math.Min(300, b.Length)]}";
                 }
@@ -531,10 +567,10 @@ internal static class Program
                 //    mock 校验其已被服务端剥离后才放行），返回并覆盖文件
                 var r3 = await post("{\"model\":\"mock-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"我最近在学 Spring Boot\"},{\"role\":\"assistant\",\"content\":\"我也喜欢<thinking>其实也很喜欢写代码</thinking>编程\"}]}");
                 var b3 = await r3.Content.ReadAsStringAsync();
-                if (r3.StatusCode != HttpStatusCode.OK || !b3.Contains("喜欢喝咖啡") || !b3.Contains("Spring Boot"))
+                if (r3.StatusCode != HttpStatusCode.OK || !b3.Contains("喜欢喝咖啡") || !b3.Contains("Spring Boot") || b3.Contains("<thinking>"))
                     return $"AI generate failed: {r3.StatusCode} {b3[..Math.Min(200, b3.Length)]}";
                 var disk = File.ReadAllText(proxyAgentPath);
-                if (!disk.Contains("喜欢喝咖啡"))
+                if (!disk.Contains("喜欢喝咖啡") || disk.Contains("<thinking>"))
                     return $"generated profile not persisted: {disk[..Math.Min(160, disk.Length)]}";
 
                 File.Delete(proxyAgentPath);   // 清理，不影响后续用例
@@ -566,7 +602,7 @@ internal static class Program
                 if (r1.StatusCode != HttpStatusCode.OK || cid.Length == 0)
                     return $"create failed: {r1.StatusCode} {b1[..Math.Min(120, b1.Length)]}";
 
-                // 3) 保存消息（不带标题 → 自动取首条用户消息前 24 字）
+                // 3) 保存消息（不带标题 → 自动取首条用户消息前 20 字）
                 var r2 = await h.PostAsync($"http://localhost:{proxyPort}/conversations/{cid}",
                     new StringContent("{\"messages\":[{\"role\":\"user\",\"content\":\"你好，我叫小李\"},{\"role\":\"assistant\",\"content\":\"你好！\"}]}",
                         System.Text.Encoding.UTF8, "application/json"));
@@ -584,7 +620,7 @@ internal static class Program
                     new StringContent("{\"model\":\"mock-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"你好，我叫小李\"}]}",
                         System.Text.Encoding.UTF8, "application/json"));
                 var b4b = await r4.Content.ReadAsStringAsync();
-                if (r4.StatusCode != HttpStatusCode.OK || !b4b.Contains("和小李的对话"))
+                if (r4.StatusCode != HttpStatusCode.OK || !b4b.Contains("和小李的对话") || b4b.Contains("<thinking>"))
                     return $"title summarize failed: {r4.StatusCode} {b4b[..Math.Min(160, b4b.Length)]}";
 
                 // 5) 读详情能拿回消息
@@ -607,6 +643,149 @@ internal static class Program
 
                 return null;
             });
+
+        // ── Case 22: StripThinking 语义回归（与前端 splitThinking 对齐） ──
+        await RunCase(proxy, http, "StripThinking: <think>/<thinking> tags, unclosed, no false-positive on bare 'thinking'",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = false,
+            }, async h =>
+            {
+                var strip = typeof(ProxyServer).GetMethod("StripThinking",
+                    System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
+                string St(string s) => (string)strip.Invoke(null, new object[] { s })!;
+                var cases = new (string input, string expect)[]
+                {
+                    ("我在 thinking 了很久才明白", "我在 thinking 了很久才明白"),   // 裸 thinking 无闭合 → 不误删（修复前会删到结尾）
+                    ("unthinking 机器", "unthinking 机器"),                       // 词边界：不误伤普通单词
+                    ("<think>悄悄想</think>正文", "正文"),                          // <think> 闭合 → 剥离（修复前不剥）
+                    ("<thinking>a</thinking>正文", "正文"),                        // <thinking> 闭合 → 剥离
+                    ("thinking 过程 response 正文", "正文"),                        // 裸 thinking…response 兜底剥离（早期历史）
+                    ("<thinking>进行中", ""),                                     // 未闭合 → 剩余全剥（与前端 splitThinking 一致）
+                    ("<THINKING>x</THINKING>ok", "ok"),                           // 大小写不敏感
+                };
+                foreach (var (input, expect) in cases)
+                {
+                    var got = St(input);
+                    if (got != expect)
+                        return $"strip thinking failed: '{input}' → '{got}', expect '{expect}'";
+                }
+
+                // 端到端：<think> 残留会被 mock 上游拒绝（校验 reqBody 含 "think"）→ 修复前 400、修复后通过
+                var r = await h.PostAsync($"http://localhost:{proxyPort}/agent",
+                    new StringContent(
+                        "{\"model\":\"mock-model-a\",\"messages\":[{\"role\":\"user\",\"content\":\"我最近在学 Go\"},{\"role\":\"assistant\",\"content\":\"<think>其实我也在想</think>写 Go 挺顺手\"}]}",
+                        System.Text.Encoding.UTF8, "application/json"));
+                var b = await r.Content.ReadAsStringAsync();
+                File.Delete(proxyAgentPath);   // 清理写盘画像，不影响后续用例
+                // mock 返回的画像本身带 <thinking> 块：输出侧剥了才干净（响应与磁盘都不得含思维链）
+                return r.StatusCode == HttpStatusCode.OK && b.Contains("喜欢喝咖啡") && !b.Contains("<thinking>")
+                    ? null
+                    : $"<think> strip failed: {r.StatusCode} {b[..Math.Min(200, b.Length)]}";
+            });
+
+        // ── Case 23: /chat 流式中途空闲超时 → 已开始的 SSE 追加错误事件（而非整体总时长掐断） ──
+        await RunCase(proxy, http, "/chat idle timeout mid-stream → error event appended",
+            new AppConfig
+            {
+                UpstreamUrl = $"http://localhost:{upstreamPort}",
+                Port = proxyPort,
+                RequireAuth = false,
+                UpstreamTimeoutSeconds = 1,
+            }, async h =>
+            {
+                var r = await h.PostAsync($"http://localhost:{proxyPort}/chat", new StringContent(
+                    "{\"model\":\"m1\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"x-idle-slow\":true}",
+                    System.Text.Encoding.UTF8, "application/json"));
+                var body = await r.Content.ReadAsStringAsync();
+                // 期望: 200 + 已收首块 + 超时错误事件收尾 + 无 [DONE]（流式不被整体总时长误杀）
+                var ok = r.StatusCode == HttpStatusCode.OK
+                    && body.Contains("你好")
+                    && body.Contains("\"error\"")
+                    && !body.Contains("[DONE]");
+                return ok ? null : $"status={r.StatusCode} body={body}";
+            });
+
+        // ── Case 24: Companion——快照差值/历史裁剪/播报分支/静音（独立实例 + 临时文件，不碰真实数据） ──
+        {
+            var companionPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-companion.json");
+            File.Delete(companionPath);
+            var cProxy = new ProxyServer(
+                Path.Combine(Path.GetTempPath(), "myrouter-smoke-companion-agent.md"),
+                Path.Combine(Path.GetTempPath(), "myrouter-smoke-companion-convs.json"));
+            try
+            {
+                var companion = new Companion(cProxy, companionPath);
+                var errs = new List<string>();
+                void Check(bool cond, string msg) { if (!cond) errs.Add(msg); }
+
+                // 1) 时段分支：深夜只劝睡、白天问候
+                Check(companion.BuildMessage(new DateTime(2026, 9, 8, 23, 30, 0), true) == "夜深了，早点休息，别让代理替你熬夜", "23点应劝睡");
+                Check(companion.BuildMessage(new DateTime(2026, 9, 8, 0, 30, 0), true) == "夜深了，早点休息，别让代理替你熬夜", "0点应劝睡");
+                Check(companion.BuildMessage(new DateTime(2026, 9, 8, 3, 0, 0), true) == "凌晨还在折腾？快去睡吧，明天再战", "3点应劝睡");
+                Check(companion.BuildMessage(new DateTime(2026, 9, 8, 8, 0, 0), true) == "早上好。", "无请求时应只问候");
+                Check(companion.BuildMessage(new DateTime(2026, 9, 8, 12, 0, 0), true) == "中午好。", "12点应中午好");
+                Check(companion.BuildMessage(new DateTime(2026, 9, 8, 20, 0, 0), true) == "晚上好。", "20点应晚上好");
+
+                // 2) 快照差值：基线后新增的计数才累计进当天，不重复
+                cProxy.Stats.Requests = 0; cProxy.Stats.TokensIn = 0; cProxy.Stats.TokensOut = 0;
+                companion.Snapshot(DateTime.Now);
+                cProxy.Stats.Requests = 7; cProxy.Stats.TokensIn = 300; cProxy.Stats.TokensOut = 600;
+                companion.Snapshot(DateTime.Now);
+                var disk = File.ReadAllText(companionPath);
+                var today = DateTime.Now.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+                Check(disk.Contains($"\"{today}\"") && disk.Contains("\"Requests\": 7") && disk.Contains("\"Tokens\": 900"),
+                    $"快照差值累计: {disk}");
+
+                // 3) 历史裁剪：超 60 天的档期写入后立即被移除，且不误删今天
+                cProxy.Stats.Requests = 8;
+                companion.Snapshot(DateTime.Now.AddDays(-70));
+                var oldKey = DateTime.Now.AddDays(-70).ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+                var disk3 = File.ReadAllText(companionPath);
+                Check(!disk3.Contains($"\"{oldKey}\""), "70天前记录应被裁剪");
+                Check(disk3.Contains($"\"{today}\""), "裁剪不应误删今天记录");
+                cProxy.Stats.Requests = 9;
+                companion.Snapshot(DateTime.Now);   // 今天 +1，同时把差值基线推到 9
+
+                // 4) 本次运行无请求时播报昨天（快照差值把新增计数记入昨天）
+                cProxy.Stats.Requests = 10;
+                companion.Snapshot(DateTime.Now.AddDays(-1));   // 昨天记录 +1
+                cProxy.Stats.Requests = 0;                      // 模拟本次运行 0 请求（字段直接写仅测试用）
+                var yesterdayMsg = companion.BuildMessage(new DateTime(2026, 9, 8, 9, 0, 0), true);
+                Check(yesterdayMsg.Contains("昨天默默跑了 1 个请求"), $"应播报昨天: {yesterdayMsg}");
+
+                // 5) 有请求时播报本次运行统计（含错误/超时计数）
+                cProxy.Stats.Requests = 5; cProxy.Stats.TokensIn = 100; cProxy.Stats.TokensOut = 200;
+                cProxy.Stats.Errors = 1; cProxy.Stats.Timeouts = 2;
+                var withStats = companion.BuildMessage(new DateTime(2026, 9, 8, 9, 0, 0), true);
+                Check(withStats.Contains("5 个请求") && withStats.Contains("300 token") && withStats.Contains("3 个出问题"),
+                    $"统计播报: {withStats}");
+
+                // 6) 静音：不触发 Says
+                var said = 0;
+                companion.Says += _ => said++;
+                companion.Speak("hello");
+                Check(said == 1, "未静音时 Speak 应触发");
+                companion.SetMuted(true);
+                companion.Speak("hello2");
+                Check(said == 1, "静音后 Speak 不应触发");
+                companion.SetMuted(false);
+                companion.Speak("hello3");
+                Check(said == 2, "恢复后 Speak 应触发");
+
+                Console.WriteLine(errs.Count == 0
+                    ? "[OK] Companion: snapshot delta, trim, message branches, mute"
+                    : $"[FAIL] Companion: {string.Join("; ", errs)}");
+                if (errs.Count > 0) _failures++;
+            }
+            finally
+            {
+                cProxy.Dispose();
+                File.Delete(companionPath);
+            }
+        }
 
         // ── Case 8: 前缀去重 ─ upstream=/v1, client=/v1/chat/completions → /v1/chat/completions ──
         await RunCase(proxy, http, "Prefix dedup: /v1 + /v1/chat/completions → /v1/chat/completions",
@@ -680,7 +859,7 @@ internal static class Program
         await proxy.StopAsync();
         proxy.Dispose();
         upstream.Stop();
-        upstreamTask.Wait(TimeSpan.FromSeconds(2));
+        try { upstreamTask.Wait(TimeSpan.FromSeconds(2)); } catch { /* mock 线程异常已在循环内隔离，此处仅清理 */ }
         Console.WriteLine(_failures == 0
             ? "\n冒烟测试完成，全部通过。"
             : $"\n冒烟测试完成，{_failures} 个用例失败。");

@@ -44,10 +44,10 @@ public class Companion
         Says?.Invoke(msg);
     }
 
-    public Companion(ProxyServer proxy)
+    public Companion(ProxyServer proxy, string? path = null)
     {
         _proxy = proxy;
-        _path = AppPaths.CompanionFile;
+        _path = path ?? AppPaths.CompanionFile;
         Load();
     }
 

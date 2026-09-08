@@ -530,6 +530,12 @@ public class ProxyServer : IDisposable
             await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, "标题生成失败（请检查上游配置与 key）");
             return;
         }
+        title = StripThinking(title);   // 推理模型输出可能带思维链块，剥掉再取标题
+        if (string.IsNullOrWhiteSpace(title))
+        {
+            await WriteChatError(ctx, (int)HttpStatusCode.BadGateway, "标题生成失败（请检查上游配置与 key）");
+            return;
+        }
         title = title.Trim().Trim('"', '\'', '「', '」', '《', '》', '“', '”', '，', '。');
         if (!_conversations.Save(id, title, null))
         {
@@ -554,7 +560,12 @@ public class ProxyServer : IDisposable
         var existing = ReadAgentProfile();
         var user = "现有画像：\n" + (string.IsNullOrWhiteSpace(existing) ? "（无）" : existing) +
                    "\n\n最新对话：\n" + MessagesToText(messages);
-        return await AskUpstreamAsync(sys, user, "x-agent-refine", model);
+        var text = await AskUpstreamAsync(sys, user, "x-agent-refine", model);
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        // 输出侧同样剥离思维链：推理模型可能把思考写进 content（<thinking>/thinking…response），
+        // 不剥则整个思维链被写进 agent.md，之后每次聊天都作为 system 注入，画像被污染
+        text = StripThinking(text);
+        return string.IsNullOrWhiteSpace(text) ? null : text;   // 只剩思维链 → 视为生成失败，不覆盖现有画像
     }
 
     /// <summary>调用上游非流式补全，返回 assistant 正文；失败返回 null。</summary>
@@ -593,12 +604,40 @@ public class ProxyServer : IDisposable
             return $"[{role}] {StripThinking(ConversationStore.ContentToText(m?["content"]))}";
         }));
 
-    /// <summary>剥离思维链标签（与前端 splitThinking 同语义：&lt;thinking&gt;…&lt;/thinking&gt; 与 thinking…response，支持未闭合）。</summary>
+    /// <summary>剥离思维链标签：尖括号块与前端 splitThinking 同语义（&lt;thinking&gt;/&lt;think&gt;，大小写不敏感、多块、未闭合即剩余全剥）；
+    /// 另兜底剥离早期版本混入历史的裸 thinking…response 块——必须闭合到 response 且带词边界，正文里孤立的 "thinking" 单词不会被误删。</summary>
     private static string StripThinking(string text)
     {
-        text = System.Text.RegularExpressions.Regex.Replace(text, "<thinking>(?s:.*?)</thinking>", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        text = System.Text.RegularExpressions.Regex.Replace(text, "\\s*thinking[\\s\\S]*?(?:\\s*response|$)", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (string.IsNullOrEmpty(text)) return text;
+        text = StripTaggedThinking(text);
+        text = System.Text.RegularExpressions.Regex.Replace(text,
+            @"\bthinking[\s\S]*?\bresponse\b", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
         return text.Trim();
+    }
+
+    /// <summary>剥 &lt;thinking&gt;…&lt;/thinking&gt; 与 &lt;think&gt;…&lt;/think&gt; 块（与前端 splitThinking 同语义：取最早开标签、
+    /// 对应最早闭标签；未闭合则剩余全部视为思维链丢弃）。</summary>
+    private static string StripTaggedThinking(string text)
+    {
+        var sb = new StringBuilder(text.Length);
+        var lower = text.ToLowerInvariant();
+        var i = 0;
+        for (var guard = 0; guard < 16; guard++)   // 与前端一致的块数上限
+        {
+            var openA = lower.IndexOf("<thinking>", i, StringComparison.Ordinal);
+            var openB = lower.IndexOf("<think>", i, StringComparison.Ordinal);
+            var open = openA == -1 ? openB : openB == -1 ? openA : Math.Min(openA, openB);
+            if (open == -1) { sb.Append(text, i, text.Length - i); break; }
+            var openLen = open == openA ? "<thinking>".Length : "<think>".Length;
+            sb.Append(text, i, open - i);
+
+            var closeA = lower.IndexOf("</thinking>", open + openLen, StringComparison.Ordinal);
+            var closeB = lower.IndexOf("</think>", open + openLen, StringComparison.Ordinal);
+            var close = closeA == -1 ? closeB : closeB == -1 ? closeA : Math.Min(closeA, closeB);
+            if (close == -1) break;   // 未闭合：剩余视为进行中的思维链，丢弃
+            i = close + (close == closeA ? "</thinking>".Length : "</think>".Length);
+        }
+        return sb.ToString();
     }
 
     private static async Task<JsonObject?> ReadBodyJsonAsync(HttpContext ctx)
@@ -664,8 +703,31 @@ public class ProxyServer : IDisposable
             ctx.Response.StatusCode = (int)HttpStatusCode.OK;
             ctx.Response.ContentType = "text/event-stream";
             ctx.Response.Headers["Cache-Control"] = "no-cache";
-            await resp.Content.CopyToAsync(ctx.Response.Body, timeoutCts.Token);
-            TrackEnd(resp.StatusCode, resp.Content.Headers.ContentLength ?? 0);
+            // SSE 流式复制不受 _upstreamTimeout 总时长限制（长思考/长输出会话不能被整段掐断）：
+            // 首字节仍由上面的 SendAsync 超时兜底，这里改为每个数据块之间的空闲超时——
+            // 上游停顿超过 _upstreamTimeout 才判定超时
+            await using var upstream = await resp.Content.ReadAsStreamAsync(timeoutCts.Token);
+            var buffer = new byte[81920];
+            while (true)
+            {
+                using var idleCts = CancellationTokenSource.CreateLinkedTokenSource(ctx.RequestAborted);
+                idleCts.CancelAfter(_upstreamTimeout);
+                int read;
+                try
+                {
+                    read = await upstream.ReadAsync(buffer, idleCts.Token);
+                }
+                catch (OperationCanceledException) when (idleCts.IsCancellationRequested && !ctx.RequestAborted.IsCancellationRequested)
+                {
+                    // 流式中途空闲超时：追加错误事件收尾（与整体超时同一出口）
+                    Interlocked.Increment(ref _stats.Timeouts);
+                    await WriteChatStreamError(ctx, "上游请求超时");
+                    break;
+                }
+                if (read == 0) break;
+                await ctx.Response.Body.WriteAsync(buffer.AsMemory(0, read), ctx.RequestAborted);
+            }
+            TrackEnd(resp.StatusCode, 0);
         }
         catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ctx.RequestAborted.IsCancellationRequested)
         {
@@ -703,7 +765,8 @@ public class ProxyServer : IDisposable
     private void InjectAgentProfile(JsonObject payload)
     {
         if (payload["messages"] is not JsonArray arr || arr.Count == 0) return;
-        var profile = ReadAgentProfile().Trim();
+        // 存量画像可能混入早期版本未剥离的思维链，注入前兜底剥一次，避免垃圾随每次聊天进入上下文
+        var profile = StripThinking(ReadAgentProfile());
         if (profile.Length == 0) return;
 
         var insertAt = 0;
