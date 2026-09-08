@@ -657,7 +657,7 @@ internal static class Program
                 var list = store.List();
                 if (list.Count != 1 || list[0].Id != "conv-load" || list[0].Title != "旧会话" ||
                     list[0].UpdatedAt != "2026-09-01T10:00:00")
-                    errs.Add($"列表恢复: {list.Count} 条 / UpdatedAt={list[0].UpdatedAt}");
+                    errs.Add($"列表恢复: {list.Count} 条 / UpdatedAt={(list.Count > 0 ? list[0].UpdatedAt : "(empty)")}");
                 var c = store.Get("conv-load");
                 if (c is null || c.Messages.Count != 1 ||
                     c.Messages[0]["role"]?.GetValue<string>() != "user" ||
@@ -755,11 +755,16 @@ internal static class Program
             {
                 var store = new ConversationStore(corruptPath);
                 var list = store.List();
-                // good-1 + good-2 共 2 条；corrupt 那条 Messages 不是对象数组，per-conv 跳过
+                var g1 = store.Get("good-1");
+                var g2 = store.Get("good-2");
+                // good-1 + good-2 共 2 条；corrupt 那条 Messages 不是对象数组，per-conv 跳过。
+                // 同时验证 good 条目的 Title 与 Messages 内容真被恢复（不是只加载了 metadata）。
                 var ok = list.Count == 2
                     && list.Any(m => m.Id == "good-1")
                     && list.Any(m => m.Id == "good-2")
-                    && !list.Any(m => m.Id == "corrupt");
+                    && !list.Any(m => m.Id == "corrupt")
+                    && g1?.Title == "正常1" && g1?.Messages.Count == 1 && g1?.Messages[0]["content"]?.GetValue<string>() == "hi"
+                    && g2?.Title == "正常2" && g2?.Messages.Count == 1 && g2?.Messages[0]["content"]?.GetValue<string>() == "hi";
                 Console.WriteLine(ok
                     ? "[OK] ConversationStore: skip corrupt entry, keep others"
                     : $"[FAIL] ConversationStore corruption tolerance: loaded {list.Count} entries (ids: {string.Join(",", list.Select(m => m.Id))})");

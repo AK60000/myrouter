@@ -44,22 +44,25 @@ public class ProxyServer : IDisposable
 
     private readonly string _agentProfilePath;
     private readonly ConversationStore _conversations;
+    private readonly Func<HttpContext, Task> _conversationsHandler;
 
     public ProxyServer(string? agentProfilePath = null, string? conversationsPath = null)
     {
         _agentProfilePath = agentProfilePath ?? AppPaths.AgentFile;
         _conversations = new ConversationStore(conversationsPath);
+        // /conversations 每请求命中，方法组转换会捕获 this 产生新委托；构造期缓存一次避免 GC 压力。
+        _conversationsHandler = HandleConversationsAsync;
 
         _webRoutes =
         [
-            ("GET", "/", ServeIndexAsync),
-            ("GET", "/models", HandleModelsAsync),
-            ("GET", "/logo.png", HandleLogoAsync),
-            ("GET", "/md/vendor.js", ctx => HandleStaticAsync(ctx, ".vendor.js", "text/javascript; charset=utf-8")),
-            ("GET", "/md/katex.css", ctx => HandleStaticAsync(ctx, ".katex.css", "text/css; charset=utf-8")),
-            ("GET", "/agent", HandleAgentAsync),
-            ("POST", "/chat", HandleChatAsync),
-            ("POST", "/agent", HandleAgentAsync),
+            (HttpMethods.Get, "/", ServeIndexAsync),
+            (HttpMethods.Get, "/models", HandleModelsAsync),
+            (HttpMethods.Get, "/logo.png", HandleLogoAsync),
+            (HttpMethods.Get, "/md/vendor.js", ctx => HandleStaticAsync(ctx, ".vendor.js", "text/javascript; charset=utf-8")),
+            (HttpMethods.Get, "/md/katex.css", ctx => HandleStaticAsync(ctx, ".katex.css", "text/css; charset=utf-8")),
+            (HttpMethods.Get, "/agent", HandleAgentAsync),
+            (HttpMethods.Post, "/chat", HandleChatAsync),
+            (HttpMethods.Post, "/agent", HandleAgentAsync),
         ];
     }
 
@@ -280,7 +283,7 @@ public class ProxyServer : IDisposable
             if (HttpMethods.IsGet(ctx.Request.Method) || HttpMethods.IsPost(ctx.Request.Method) ||
                 HttpMethods.IsDelete(ctx.Request.Method))
             {
-                handler = HandleConversationsAsync;
+                handler = _conversationsHandler;
                 return true;
             }
             return false;
@@ -782,8 +785,8 @@ public class ProxyServer : IDisposable
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]?> EmbeddedCache = new();
 
     /// <summary>从程序集嵌入资源按文件名后缀读取（进程内缓存：静态资源每次请求都重新枚举/拷贝是浪费）。
-    /// internal：MainForm 取应用图标复用同一缓存。</summary>
-    internal static byte[]? LoadEmbeddedResource(string suffix) => EmbeddedCache.GetOrAdd(suffix, s =>
+    /// 经 LoadIcon 公开给 MainForm 复用同一缓存。</summary>
+    private static byte[]? LoadEmbeddedResource(string suffix) => EmbeddedCache.GetOrAdd(suffix, s =>
     {
         var asm = typeof(ProxyServer).Assembly;
         var name = asm.GetManifestResourceNames()

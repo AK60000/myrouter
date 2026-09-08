@@ -156,9 +156,10 @@ public class ConversationStore
     {
         try
         {
-            if (!File.Exists(_path)) return;
             // 单条损坏不应连累全部会话：解析 Conversations 数组，逐条 Deserialize<Conversation>，
             // 失败的条目跳过。失败仍写满文件（Save 用 Pretty 重新覆盖），数据规模由 MaxConversations 控制。
+            // 外层 catch 覆盖 FileNotFoundException / DirectoryNotFoundException / JSON 整体损坏，
+            // 不需要先 File.Exists —— TOCTOU 且多一次 syscall。
             var raw = File.ReadAllText(_path);
             using var doc = JsonDocument.Parse(raw);
             if (!doc.RootElement.TryGetProperty("Conversations", out var arr) || arr.ValueKind != JsonValueKind.Array) return;
