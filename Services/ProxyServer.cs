@@ -49,6 +49,18 @@ public class ProxyServer : IDisposable
     {
         _agentProfilePath = agentProfilePath ?? AppPaths.AgentFile;
         _conversations = new ConversationStore(conversationsPath);
+
+        _webRoutes =
+        [
+            ("GET", "/", ServeIndexAsync),
+            ("GET", "/models", HandleModelsAsync),
+            ("GET", "/logo.png", HandleLogoAsync),
+            ("GET", "/md/vendor.js", ctx => HandleStaticAsync(ctx, ".vendor.js", "text/javascript; charset=utf-8")),
+            ("GET", "/md/katex.css", ctx => HandleStaticAsync(ctx, ".katex.css", "text/css; charset=utf-8")),
+            ("GET", "/agent", HandleAgentAsync),
+            ("POST", "/chat", HandleChatAsync),
+            ("POST", "/agent", HandleAgentAsync),
+        ];
     }
 
     // 透明代理：必须原样透传上游响应（含 Content-Encoding/Content-Length），
@@ -141,9 +153,9 @@ public class ProxyServer : IDisposable
         // Web 界面分流：根路径等本地路径由本机 UI 使用（跳过本地鉴权），其余路径照常走代理
         app.Use(async (ctx, next) =>
         {
-            if (IsWebRequest(ctx))
+            if (TryGetWebHandler(ctx, out var web))
             {
-                await HandleWebAsync(ctx);
+                await web(ctx);
                 return;
             }
             await next();
@@ -256,55 +268,36 @@ public class ProxyServer : IDisposable
 
     // ── Web 界面（同端口根路径，本机 UI 使用，跳过本地鉴权） ──
 
-    private static bool IsWebRequest(HttpContext ctx)
-    {
-        var p = ctx.Request.Path;
-        if (HttpMethods.IsGet(ctx.Request.Method))
-            return p.Equals("/") || p.Equals("/models") || p.Equals("/logo.png") || p.Equals("/agent")
-                || p.Equals("/md/vendor.js") || p.Equals("/md/katex.css") || p.StartsWithSegments("/conversations");
-        if (HttpMethods.IsPost(ctx.Request.Method))
-            return p.Equals("/chat") || p.Equals("/agent") || p.StartsWithSegments("/conversations");
-        return HttpMethods.IsDelete(ctx.Request.Method) && p.StartsWithSegments("/conversations");
-    }
+    /// <summary>(方法, 路径) → 处理器的一张路由表：同时承担"是否分流"的判断与请求分发，
+    /// 端点清单只在这里维护（/conversations 为前缀路由，单独前缀匹配）。</summary>
+    private readonly (string Method, string Path, Func<HttpContext, Task> Handler)[] _webRoutes;
 
-    private async Task HandleWebAsync(HttpContext ctx)
+    private bool TryGetWebHandler(HttpContext ctx, out Func<HttpContext, Task> handler)
     {
-        if (ctx.Request.Path.Equals("/chat"))
-        {
-            await HandleChatAsync(ctx);
-            return;
-        }
-        if (ctx.Request.Path.Equals("/models"))
-        {
-            await HandleModelsAsync(ctx);
-            return;
-        }
-        if (ctx.Request.Path.Equals("/logo.png"))
-        {
-            await HandleLogoAsync(ctx);
-            return;
-        }
-        if (ctx.Request.Path.Equals("/md/vendor.js"))
-        {
-            await HandleStaticAsync(ctx, ".vendor.js", "text/javascript; charset=utf-8");
-            return;
-        }
-        if (ctx.Request.Path.Equals("/md/katex.css"))
-        {
-            await HandleStaticAsync(ctx, ".katex.css", "text/css; charset=utf-8");
-            return;
-        }
-        if (ctx.Request.Path.Equals("/agent"))
-        {
-            await HandleAgentAsync(ctx);
-            return;
-        }
+        handler = null!;
         if (ctx.Request.Path.StartsWithSegments("/conversations"))
         {
-            await HandleConversationsAsync(ctx);
-            return;
+            if (HttpMethods.IsGet(ctx.Request.Method) || HttpMethods.IsPost(ctx.Request.Method) ||
+                HttpMethods.IsDelete(ctx.Request.Method))
+            {
+                handler = HandleConversationsAsync;
+                return true;
+            }
+            return false;
         }
+        foreach (var (method, path, h) in _webRoutes)
+        {
+            if (string.Equals(ctx.Request.Method, method, StringComparison.OrdinalIgnoreCase) && ctx.Request.Path.Equals(path))
+            {
+                handler = h;
+                return true;
+            }
+        }
+        return false;
+    }
 
+    private static async Task ServeIndexAsync(HttpContext ctx)
+    {
         ctx.Response.ContentType = "text/html; charset=utf-8";
         await ctx.Response.WriteAsync(IndexHtml.Value ?? "<h1>myrouter</h1><p>Web 页面缺失</p>", ctx.RequestAborted);
     }
@@ -788,8 +781,9 @@ public class ProxyServer : IDisposable
 
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte[]?> EmbeddedCache = new();
 
-    /// <summary>从程序集嵌入资源按文件名后缀读取（进程内缓存：静态资源每次请求都重新枚举/拷贝是浪费）。</summary>
-    private static byte[]? LoadEmbeddedResource(string suffix) => EmbeddedCache.GetOrAdd(suffix, s =>
+    /// <summary>从程序集嵌入资源按文件名后缀读取（进程内缓存：静态资源每次请求都重新枚举/拷贝是浪费）。
+    /// internal：MainForm 取应用图标复用同一缓存。</summary>
+    internal static byte[]? LoadEmbeddedResource(string suffix) => EmbeddedCache.GetOrAdd(suffix, s =>
     {
         var asm = typeof(ProxyServer).Assembly;
         var name = asm.GetManifestResourceNames()
@@ -802,6 +796,12 @@ public class ProxyServer : IDisposable
         return ms.ToArray();
     });
 
+    /// <summary>复用嵌入资源缓存 + 同一解码逻辑（页面 favicon 与应用图标同源不漂移）。internal 供 MainForm 复用。</summary>
+    internal static Icon? LoadIcon(string suffix) =>
+        LoadEmbeddedResource(suffix) is { Length: > 0 } bytes
+            ? new Icon(new MemoryStream(bytes))
+            : null;
+
     /// <summary>首页 HTML（解码后缓存，不再每次请求重复 GetString）。</summary>
     private static readonly Lazy<string?> IndexHtml = new(() =>
         LoadEmbeddedResource("index.html") is { Length: > 0 } bytes ? Encoding.UTF8.GetString(bytes) : null);
@@ -809,10 +809,8 @@ public class ProxyServer : IDisposable
     /// <summary>应用图标 → PNG（转换结果缓存，避免每次请求走 GDI+ 位图转换）。</summary>
     private static readonly Lazy<byte[]?> LogoPng = new(() =>
     {
-        var ico = LoadEmbeddedResource("myrouter.ico");
-        if (ico is null) return null;
-        using var ms = new MemoryStream(ico);
-        using var icon = new Icon(ms);
+        using var icon = LoadIcon("myrouter.ico");
+        if (icon is null) return null;
         using var bmp = icon.ToBitmap();
         using var outMs = new MemoryStream();
         bmp.Save(outMs, System.Drawing.Imaging.ImageFormat.Png);

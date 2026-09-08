@@ -19,4 +19,10 @@ internal static class JsonOpts
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     };
+
+    /// <summary>磁盘写入：缩进 + 中文原样（AppConfig / Companion / ConversationStore 共用）。</summary>
+    public static readonly JsonSerializerOptions Pretty = new(Unsafe)
+    {
+        WriteIndented = true,
+    };
 }

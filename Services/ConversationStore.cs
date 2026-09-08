@@ -141,18 +141,13 @@ public class ConversationStore
         return "";
     }
 
-    private static readonly JsonSerializerOptions SaveJsonOptions = new(JsonOpts.Unsafe)
-    {
-        WriteIndented = true,
-    };
-
     private void Save()
     {
         try
         {
             var dir = Path.GetDirectoryName(_path);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(_path, JsonSerializer.Serialize(_data, SaveJsonOptions));
+            File.WriteAllText(_path, JsonSerializer.Serialize(_data, JsonOpts.Pretty));
         }
         catch { /* 会话写失败不影响主流程 */ }
     }
@@ -162,25 +157,23 @@ public class ConversationStore
         try
         {
             if (!File.Exists(_path)) return;
-            using var doc = JsonDocument.Parse(File.ReadAllText(_path));
-            var root = doc.RootElement;
-            if (!root.TryGetProperty("Conversations", out var arr) || arr.ValueKind != JsonValueKind.Array) return;
+            // 单条损坏不应连累全部会话：解析 Conversations 数组，逐条 Deserialize<Conversation>，
+            // 失败的条目跳过。失败仍写满文件（Save 用 Pretty 重新覆盖），数据规模由 MaxConversations 控制。
+            var raw = File.ReadAllText(_path);
+            using var doc = JsonDocument.Parse(raw);
+            if (!doc.RootElement.TryGetProperty("Conversations", out var arr) || arr.ValueKind != JsonValueKind.Array) return;
+            var loaded = new Data();
             foreach (var el in arr.EnumerateArray())
             {
-                var id = el.TryGetProperty("Id", out var i) ? i.GetString() : null;
-                if (string.IsNullOrEmpty(id)) continue;
-                var conv = new Conversation
+                try
                 {
-                    Id = id,
-                    Title = el.TryGetProperty("Title", out var t) ? t.GetString() ?? "" : "",
-                    CreatedAt = el.TryGetProperty("CreatedAt", out var ca) ? ca.GetString() ?? "" : "",
-                    UpdatedAt = el.TryGetProperty("UpdatedAt", out var ua) ? ua.GetString() ?? "" : "",
-                };
-                if (el.TryGetProperty("Messages", out var ms) && ms.ValueKind == JsonValueKind.Array)
-                    foreach (var m in ms.EnumerateArray())
-                        if (JsonNode.Parse(m.GetRawText()) is JsonObject jo) conv.Messages.Add(jo);
-                _data.Conversations.Add(conv);
+                    var conv = el.Deserialize<Conversation>();
+                    if (conv != null && !string.IsNullOrEmpty(conv.Id))
+                        loaded.Conversations.Add(conv);
+                }
+                catch { /* 单条损坏跳过，其余继续 */ }
             }
+            _data = loaded;
         }
         catch { _data = new Data(); }
     }

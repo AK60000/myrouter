@@ -644,6 +644,130 @@ internal static class Program
                 return null;
             });
 
+        // ── Case 21.5: ConversationStore.Load —— 旧格式磁盘文件反序列化（PascalCase + JsonObject 消息恢复） ──
+        {
+            var convsPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-load-convs.json");
+            File.Delete(convsPath);
+            File.WriteAllText(convsPath,
+                """{"Conversations":[{"Id":"conv-load","Title":"旧会话","Messages":[{"role":"user","content":"你好"}],"CreatedAt":"2026-09-01T10:00:00","UpdatedAt":"2026-09-01T10:00:00"}]}""");
+            try
+            {
+                var store = new ConversationStore(convsPath);
+                var errs = new List<string>();
+                var list = store.List();
+                if (list.Count != 1 || list[0].Id != "conv-load" || list[0].Title != "旧会话" ||
+                    list[0].UpdatedAt != "2026-09-01T10:00:00")
+                    errs.Add($"列表恢复: {list.Count} 条 / UpdatedAt={list[0].UpdatedAt}");
+                var c = store.Get("conv-load");
+                if (c is null || c.Messages.Count != 1 ||
+                    c.Messages[0]["role"]?.GetValue<string>() != "user" ||
+                    c.Messages[0]["content"]?.GetValue<string>() != "你好" ||
+                    c.CreatedAt != "2026-09-01T10:00:00" ||
+                    c.UpdatedAt != "2026-09-01T10:00:00")
+                    errs.Add($"消息/时间戳未恢复: msgs={c?.Messages.Count}, ca={c?.CreatedAt}, ua={c?.UpdatedAt}");
+                Console.WriteLine(errs.Count == 0
+                    ? "[OK] ConversationStore: load legacy file"
+                    : $"[FAIL] ConversationStore load: {string.Join("; ", errs)}");
+                if (errs.Count > 0) _failures++;
+            }
+            finally { File.Delete(convsPath); }
+        }
+
+        // ── Case 21.6: JsonOpts.Pretty round-trip —— 三处写入器统一编码策略不漂移 ──
+        {
+            var errs = new List<string>();
+
+            // ConversationStore 写入 + 重读，中文标题/消息还原 + 磁盘含原字符（非 \uXXXX）。
+            // 三个写入器（AppConfig / Companion / ConversationStore）都用 Pretty，
+            // 编码策略从 Unsafe 漂到 default 会立即体现在磁盘文件上。
+            var rtPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-roundtrip.json");
+            File.Delete(rtPath);
+            try
+            {
+                var s1 = new ConversationStore(rtPath);
+                var c = s1.Create();
+                var msgs = new List<System.Text.Json.Nodes.JsonObject>
+                {
+                    new() { ["role"] = "user", ["content"] = "你好 round-trip" },
+                };
+                s1.Save(c.Id, "中文标题", msgs);
+                var s2 = new ConversationStore(rtPath);
+                var c2 = s2.Get(c.Id);
+                if (c2 is null || c2.Title != "中文标题" ||
+                    c2.Messages.Count != 1 ||
+                    c2.Messages[0]["content"]?.GetValue<string>() != "你好 round-trip")
+                    errs.Add($"ConversationStore round-trip: title={c2?.Title}, msgs={c2?.Messages.Count}");
+                var disk2 = File.ReadAllText(rtPath);
+                if (!disk2.Contains("中文标题") || disk2.Contains("\\u4e2d\\u6587"))
+                    errs.Add($"ConversationStore 中文被转义: {disk2}");
+            }
+            finally { File.Delete(rtPath); }
+
+            Console.WriteLine(errs.Count == 0
+                ? "[OK] JsonOpts.Pretty round-trip"
+                : $"[FAIL] JsonOpts.Pretty round-trip: {string.Join("; ", errs)}");
+            if (errs.Count > 0) _failures++;
+        }
+
+        // ── Case 21.7: ConversationStore.Load 容错 —— 单条损坏不应连累其它会话（R1-1 fix witness） ──
+        {
+            var corruptPath = Path.Combine(Path.GetTempPath(), "myrouter-smoke-corrupt-convs.json");
+            File.Delete(corruptPath);
+            // 三条会话：good-1 正常、corrupt 最后一条消息是 JSON 字符串（非对象，pre-diff 代码会跳过，
+            // buggy Deserialize<Data> 会抛 catch 重置 下次 Save 抹掉全部）、good-2 正常。
+            // 用 JsonNode 直接构造 JSON，避免源文件里的字符串转义反复出错。
+            var root = new System.Text.Json.Nodes.JsonObject
+            {
+                ["Conversations"] = new System.Text.Json.Nodes.JsonArray
+                {
+                    new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["Id"] = "good-1", ["Title"] = "正常1",
+                        ["Messages"] = new System.Text.Json.Nodes.JsonArray
+                        {
+                            new System.Text.Json.Nodes.JsonObject { ["role"] = "user", ["content"] = "hi" },
+                        },
+                        ["CreatedAt"] = "2026-09-01T10:00:00",
+                        ["UpdatedAt"] = "2026-09-01T10:00:00",
+                    },
+                    // corrupt: Messages 数组里有字符串而非对象（pre-diff 容错跳过；buggy Deserialize<Data> 抛）
+                    new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["Id"] = "corrupt", ["Title"] = "损坏",
+                        ["Messages"] = new System.Text.Json.Nodes.JsonArray { "I am a JSON string" },
+                        ["CreatedAt"] = "2026-09-01T10:00:00",
+                        ["UpdatedAt"] = "2026-09-01T10:00:00",
+                    },
+                    new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["Id"] = "good-2", ["Title"] = "正常2",
+                        ["Messages"] = new System.Text.Json.Nodes.JsonArray
+                        {
+                            new System.Text.Json.Nodes.JsonObject { ["role"] = "user", ["content"] = "hi" },
+                        },
+                        ["CreatedAt"] = "2026-09-01T10:00:00",
+                        ["UpdatedAt"] = "2026-09-01T10:00:00",
+                    },
+                },
+            };
+            File.WriteAllText(corruptPath, root.ToJsonString());
+            try
+            {
+                var store = new ConversationStore(corruptPath);
+                var list = store.List();
+                // good-1 + good-2 共 2 条；corrupt 那条 Messages 不是对象数组，per-conv 跳过
+                var ok = list.Count == 2
+                    && list.Any(m => m.Id == "good-1")
+                    && list.Any(m => m.Id == "good-2")
+                    && !list.Any(m => m.Id == "corrupt");
+                Console.WriteLine(ok
+                    ? "[OK] ConversationStore: skip corrupt entry, keep others"
+                    : $"[FAIL] ConversationStore corruption tolerance: loaded {list.Count} entries (ids: {string.Join(",", list.Select(m => m.Id))})");
+                if (!ok) _failures++;
+            }
+            finally { File.Delete(corruptPath); }
+        }
+
         // ── Case 22: StripThinking 语义回归（与前端 splitThinking 对齐） ──
         await RunCase(proxy, http, "StripThinking: <think>/<thinking> tags, unclosed, no false-positive on bare 'thinking'",
             new AppConfig

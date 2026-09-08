@@ -26,10 +26,6 @@ public class Companion
     }
 
     private const int HistoryDays = 60; // 与 LLM 缓存窗口无关，只是历史档期上限
-    private static readonly JsonSerializerOptions SaveJsonOptions = new(JsonOpts.Unsafe)
-    {
-        WriteIndented = true,
-    };
 
     private readonly ProxyServer _proxy;
     private readonly string _path;
@@ -158,7 +154,7 @@ public class Companion
     {
         try
         {
-            File.WriteAllText(_path, JsonSerializer.Serialize(_data, SaveJsonOptions));
+            File.WriteAllText(_path, JsonSerializer.Serialize(_data, JsonOpts.Pretty));
         }
         catch { /* 记忆文件写失败不影响主流程 */ }
     }

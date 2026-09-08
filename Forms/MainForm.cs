@@ -151,15 +151,11 @@ public class MainForm : Form
         _menuStop.Enabled = running;
     }
 
-    /// <summary>应用图标（内嵌 myrouter.ico，解码一次缓存——窗体/托盘/头像共用）。</summary>
+    /// <summary>应用图标（复用 ProxyServer 的嵌入资源缓存与解码逻辑，与页面 favicon 同源——窗体/托盘/头像共用）。</summary>
     private static readonly Lazy<Icon> AppIcon = new(() =>
     {
-        var asm = typeof(MainForm).Assembly;
-        var name = asm.GetManifestResourceNames()
-            .FirstOrDefault(n => n.EndsWith("myrouter.ico", StringComparison.OrdinalIgnoreCase));
-        if (name is null) return SystemIcons.Application;
-        using var stream = asm.GetManifestResourceStream(name);
-        return stream is null ? SystemIcons.Application : new Icon(stream);
+        var ico = ProxyServer.LoadIcon("myrouter.ico");
+        return ico ?? SystemIcons.Application;
     });
 
     private void BuildLayout()

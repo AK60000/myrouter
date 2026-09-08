@@ -44,7 +44,9 @@ public class AppConfig
         try
         {
             AppPaths.EnsureDir();
-            var json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
+            // JsonOpts.Pretty 与 Companion / ConversationStore 共用：磁盘文件统一缩进 + Unsafe 编码（中文不转义为 \uXXXX），
+            // 不要回退到 inline `new JsonSerializerOptions { WriteIndented = true }`——编码策略会与磁盘文件实际形态漂移。
+            var json = JsonSerializer.Serialize(this, JsonOpts.Pretty);
             File.WriteAllText(ConfigPath, json);
         }
         catch (Exception ex)
